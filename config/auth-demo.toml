@@ -1,0 +1,99 @@
+# quik auth demo — multiple [[auth]] blocks, different routes use different
+# blocks. Same JWKS in both cases (so the Python helper can mint tokens for
+# either), but with diverging issuer/audience/required-claims rules.
+#
+# Swap this in by editing docker-compose.yml's quik volume mount:
+#   - ./config/docker.toml:/etc/quik/quik.toml:ro
+#   + ./config/auth-demo.toml:/etc/quik/quik.toml:ro
+#
+# Run the JWKS helper on the host:
+#   ./scripts/mint_jwt.py init      # one-time keygen
+#   ./scripts/mint_jwt.py serve     # blocks; :9999/jwks.json
+
+mode = "edge"
+
+[listener]
+bind = "0.0.0.0:8443"
+
+[listener.tls]
+cert_path = "/etc/quik/tls/cert.pem"
+key_path  = "/etc/quik/tls/key.pem"
+
+[admin]
+bind = "0.0.0.0:9090"
+
+[shutdown]
+drain_grace_seconds = 30
+
+[logging]
+level = "${QUIK_LOG_LEVEL:-info,quik=debug}"
+
+[[upstreams]]
+name = "echo"
+balancer = "round_robin"
+members = [
+    { address = "${BACKEND_A_ADDR:-backend-a:8080}" },
+    { address = "${BACKEND_B_ADDR:-backend-b:8080}" },
+]
+
+# ─── Auth: end-user tokens ────────────────────────────────────────────────────
+# Tokens minted with mint_jwt.py's defaults satisfy this block out of the box.
+[[auth]]
+name        = "users"
+jwks_url    = "${JWKS_URL:-http://host.docker.internal:9999/jwks.json}"
+issuer      = "${JWT_ISSUER:-https://issuer.test/}"
+audience    = "api"
+algorithms  = ["EdDSA"]
+
+inject_headers = [
+    { claim = "sub",   header = "x-auth-sub",   required = true },
+    { claim = "roles", header = "x-auth-roles" },
+]
+
+# ─── Auth: service-to-service tokens ─────────────────────────────────────────
+# Same JWKS, different audience + a service_id claim is required (both as a
+# validation rule and as an injected header). Mint matching tokens with:
+#   ./scripts/mint_jwt.py sign --aud internal --claim 'service_id="billing"'
+[[auth]]
+name        = "services"
+jwks_url    = "${JWKS_URL:-http://host.docker.internal:9999/jwks.json}"
+issuer      = "${JWT_ISSUER:-https://issuer.test/}"
+audience    = "internal"
+algorithms  = ["EdDSA"]
+required_claims = ["service_id"]
+
+inject_headers = [
+    { claim = "service_id", header = "x-service-id", required = true },
+    { claim = "scope",      header = "x-service-scope" },
+]
+
+# ─── Routes ──────────────────────────────────────────────────────────────────
+
+# Anonymous public route.
+[[routes]]
+path_prefix  = "/open"
+strip_prefix = "/open"
+upstream     = "echo"
+
+# End-user-facing API. Requires a token with aud=api.
+[[routes]]
+path_prefix  = "/api"
+strip_prefix = "/api"
+auth         = "users"
+timeout_ms   = 5000
+upstream     = "echo"
+
+# Service-to-service endpoint. Requires a different audience, a service_id
+# claim, and rejects any inbound x-service-id header (spoofing protection).
+[[routes]]
+path_prefix  = "/internal"
+strip_prefix = "/internal"
+auth         = "services"
+timeout_ms   = 5000
+upstream     = "echo"
+
+# Catchall — also requires a user token. Demos the deny-by-default posture.
+[[routes]]
+path_prefix = "/"
+auth        = "users"
+upstream    = "echo"

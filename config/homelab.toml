@@ -1,0 +1,82 @@
+# Homelab sample: quik in front of Proxmox + Plex + TrueNAS.
+#
+# Routing is by hostname — proxmox.internal / plex.internal / truenas.internal
+# must all resolve (via /etc/hosts, internal DNS, or a Pi-hole-style resolver)
+# to the host running quik. Clients then hit  https://<service>.internal:8443
+# and the proxy fans out to the real backend address.
+#
+# Each backend's `Host` header in the forwarded request becomes the upstream's
+# address (e.g. 192.168.177.2:8006) — that's standard reverse-proxy behaviour
+# but it does mean if any of these services emit absolute-URL redirects in
+# the Location header (Proxmox can, TrueNAS can), the redirect will point
+# back at the internal IP rather than at proxmox.internal. The fix is on the
+# backend side (configure them to issue relative redirects, or set the proxy
+# via their own "external URL" setting). quik doesn't rewrite response
+# bodies or Location headers.
+
+mode = "edge"
+
+[listener]
+bind = "0.0.0.0:8443"
+
+[listener.tls]
+# Use ./scripts/gen-dev-cert.sh to generate, or drop in a real cert (Let's
+# Encrypt etc.) with SANs for each of the *.internal hostnames you use.
+cert_path = "./tls/cert.pem"
+key_path  = "./tls/key.pem"
+
+[admin]
+bind = "127.0.0.1:9090"
+
+[shutdown]
+drain_grace_seconds = 30
+
+[logging]
+level  = "info,quik=info"
+format = "key_value"   # human-readable; switch to "json" for log-shippers
+
+# ─── Upstreams ──────────────────────────────────────────────────────────────
+
+# Proxmox — talks HTTPS on 8006 with a self-signed cert by default.
+# Proxmox's API server is HTTP/1.1 only, which is also quik's default
+# upstream version — no need to set `http_version` explicitly.
+[[upstreams]]
+name = "proxmox"
+members = [{ address = "192.168.177.2:8006", scheme = "https" }]
+
+[upstreams.tls]
+skip_verify = true
+
+# Plex — plain HTTP on its internal management port. (Note: the Plex web
+# app will switch to *.plex.direct URLs after the initial load — that's
+# Plex's own discovery, not a quik issue. See README.)
+[[upstreams]]
+name = "plex"
+members = [{ address = "192.168.177.145:32400", scheme = "http" }]
+
+# TrueNAS — HTTPS UI on 443 with a self-signed cert by default. HTTP/1.1.
+[[upstreams]]
+name = "truenas"
+members = [{ address = "192.168.177.28:443", scheme = "https" }]
+
+[upstreams.tls]
+skip_verify = true
+
+# ─── Routes ─────────────────────────────────────────────────────────────────
+
+[[routes]]
+hosts       = ["proxmox.internal"]
+path_prefix = "/"
+upstream    = "proxmox"
+# Proxmox uses WebSockets for the noVNC / xterm.js consoles; quik forwards
+# Upgrade requests transparently so this Just Works (M2). No extra config.
+
+[[routes]]
+hosts       = ["plex.internal"]
+path_prefix = "/"
+upstream    = "plex"
+
+[[routes]]
+hosts       = ["truenas.internal"]
+path_prefix = "/"
+upstream    = "truenas"

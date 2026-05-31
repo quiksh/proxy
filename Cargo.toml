@@ -1,0 +1,78 @@
+[package]
+name = "quik"
+# Release version is managed by git tags / the Release workflow, not here.
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+description = "A low-latency reverse proxy in Rust: HTTP/1.1, HTTP/2, TLS termination, dynamic upstream pools, Prometheus metrics, graceful drain."
+readme = "README.md"
+repository = "https://github.com/quiksh/proxy"
+homepage = "https://quik.sh"
+keywords = ["proxy", "reverse-proxy", "http", "tls", "load-balancer"]
+categories = ["network-programming", "web-programming::http-server"]
+
+[dependencies]
+tokio = { version = "1.40", features = ["full"] }
+hyper = { version = "1.5", features = ["full"] }
+hyper-util = { version = "0.1.10", features = ["full"] }
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
+
+rustls = "0.23"
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "aws-lc-rs", "native-tokio"] }
+webpki-roots = "0.26"
+
+arc-swap = "1.7"
+
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["async-runtime", "tracing"] }
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+anyhow = "1"
+
+# JWT validation. getrandom underpins request-id and traceparent generation
+# (already pulled in transitively via rustls; promoted to a direct dep here).
+jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
+getrandom = "0.3"
+serde_json = "1"
+
+# Egress proxy: ipnet for CIDR matching, base64 for Basic auth decode.
+ipnet = "2"
+base64 = "0.22"
+
+# Admin API: sha2 for cert fingerprint in audit log (mTLS principal).
+sha2 = "0.10"
+
+[dev-dependencies]
+rcgen = "0.13"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "http2", "stream", "json"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+hdrhistogram = "7"
+http-body = "1"
+tokio-tungstenite = { version = "0.27", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+futures = "0.3"
+base64 = "0.22"
+
+[[bench]]
+name = "hot_path"
+harness = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+# Project-specific allows kept narrow; tighten as the codebase stabilises.
+too_many_arguments = "allow"
+module_inception = "allow"

@@ -1,0 +1,93 @@
+name: Release
+
+# Manually triggered from the Actions tab. In one run it:
+#   1. reads the latest vX.Y.Z tag and bumps the part you pick,
+#   2. creates and pushes the new tag,
+#   3. builds the quik image and publishes it to GHCR.
+#
+# Tag + build live in one job on purpose: a tag pushed with the default
+# GITHUB_TOKEN does not trigger a separate `on: push: tags` workflow, so
+# splitting them would need a PAT. This avoids that.
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Which part of the version to increment
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+
+permissions:
+  contents: write # create and push tags
+  packages: write # push to ghcr.io
+
+jobs:
+  release:
+    name: tag and publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need full history so all tags are visible
+
+      - name: Compute next version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+          latest=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+          latest=${latest:-v0.0.0}
+          ver=${latest#v}
+          IFS=. read -r major minor patch <<< "$ver"
+          case "$BUMP" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+          esac
+          echo "Bumping ${latest} -> v${major}.${minor}.${patch} (${BUMP})"
+          {
+            echo "tag=v${major}.${minor}.${patch}"
+            echo "semver=${major}.${minor}.${patch}"
+            echo "minor=${major}.${minor}"
+            echo "major=${major}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create and push tag
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git tag "$TAG"
+          git push origin "$TAG"
+          echo "### Released \`${TAG}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=${{ steps.version.outputs.semver }}
+            type=raw,value=${{ steps.version.outputs.minor }}
+            type=raw,value=${{ steps.version.outputs.major }}
+            type=raw,value=latest
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: quik-runtime
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64

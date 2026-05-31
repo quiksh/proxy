@@ -1,0 +1,50 @@
+# Demo stack: quik proxy in front of two echo backends.
+#
+# Prereqs:
+#   1. Generate self-signed certs:  ./scripts/gen-dev-cert.sh
+#   2. docker compose up --build
+#
+# Then hit:
+#   curl -k https://localhost:8443/echo/anything
+#   curl    http://localhost:9090/metrics
+#
+# Override backend targets without editing the config:
+#   BACKEND_A_ADDR=10.0.0.5:80 BACKEND_B_ADDR=10.0.0.6:80 docker compose up
+
+services:
+  quik:
+    build:
+      context: .
+      target: quik-runtime
+    image: quik:dev
+    ports:
+      - "8443:8443"
+      - "9090:9090"
+    environment:
+      BACKEND_A_ADDR: ${BACKEND_A_ADDR:-backend-a:8080}
+      BACKEND_B_ADDR: ${BACKEND_B_ADDR:-backend-b:8080}
+      QUIK_LOG_LEVEL: ${QUIK_LOG_LEVEL:-info,quik=info}
+    volumes:
+      - ./config/auth-demo.toml:/etc/quik/quik.toml:ro
+      - ./tls:/etc/quik/tls:ro
+    depends_on:
+      - backend-a
+      - backend-b
+
+  backend-a:
+    build:
+      context: .
+      target: echo-runtime
+    image: quik-echo:dev
+    environment:
+      BIND_ADDR: 0.0.0.0:8080
+      BACKEND_NAME: backend-a
+
+  backend-b:
+    build:
+      context: .
+      target: echo-runtime
+    image: quik-echo:dev
+    environment:
+      BIND_ADDR: 0.0.0.0:8080
+      BACKEND_NAME: backend-b
