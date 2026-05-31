@@ -1,0 +1,46 @@
+# quik config used inside docker-compose.
+# Strings of the form  $ {VAR}  or  $ {VAR:-default}  (no space) are expanded
+# from the process environment at startup.
+
+mode = "edge"
+
+[listener]
+bind = "0.0.0.0:8443"
+
+[listener.tls]
+cert_path = "/etc/quik/tls/cert.pem"
+key_path  = "/etc/quik/tls/key.pem"
+
+[admin]
+bind = "0.0.0.0:9090"
+
+[shutdown]
+drain_grace_seconds = 30
+
+[logging]
+level = "${QUIK_LOG_LEVEL:-info,quik=info}"
+
+[[upstreams]]
+name = "echo"
+balancer = "round_robin"
+members = [
+    { address = "${BACKEND_A_ADDR:-backend-a:8080}" },
+    { address = "${BACKEND_B_ADDR:-backend-b:8080}" },
+]
+
+# Fast-path health probe — must NOT be swallowed by the prefix route below.
+[[routes]]
+path_exact = "/healthz"
+upstream   = "echo"
+
+# /echo/* → strips /echo and forwards (so backend sees the real client path)
+[[routes]]
+path_prefix  = "/echo"
+strip_prefix = "/echo"
+timeout_ms   = 5000
+upstream     = "echo"
+
+# Catchall — no module decoration.
+[[routes]]
+path_prefix = "/"
+upstream    = "echo"

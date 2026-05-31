@@ -1,0 +1,217 @@
+# quik example configuration
+# Demonstrates every matcher and every module on at least one route.
+
+mode = "edge"
+
+[listener]
+bind = "0.0.0.0:8443"
+
+[listener.tls]
+cert_path = "./tls/cert.pem"
+key_path  = "./tls/key.pem"
+
+[admin]
+bind = "127.0.0.1:9090"
+
+# ─── Admin auth (M6) ────────────────────────────────────────────────────────
+# Per-endpoint-group auth. Both default to `none` for backwards compatibility,
+# but `write` should be set in production. When any group uses `mtls`, the
+# entire admin listener becomes TLS — read clients with `mode = "none"` still
+# connect via TLS but don't present a client cert.
+#
+# Bearer token mode reads the token from an env var at startup. The token
+# must be a non-empty string; missing or empty env var → boot fails.
+#
+# Mtls mode validates the client cert against [admin.tls].client_ca_path
+# (set below). The verified cert's SHA-256 fingerprint is recorded as the
+# audit-log principal.
+
+# [admin.auth.read]
+# mode = "none"
+
+# [admin.auth.write]
+# mode = "bearer_token"
+# token_env = "QUIK_ADMIN_TOKEN"
+
+# Or:
+# [admin.auth.write]
+# mode = "mtls"
+
+# Required when any auth group is mtls. Optional client_ca_path triggers
+# client cert verification; omit it and the listener is plain TLS without
+# mTLS (the listener is then TLS-only, not mtls-enforcing).
+# [admin.tls]
+# cert_path        = "./tls/admin-cert.pem"
+# key_path         = "./tls/admin-key.pem"
+# client_ca_path   = "./tls/admin-client-ca.pem"
+
+[shutdown]
+drain_grace_seconds = 30
+
+[logging]
+level  = "info,quik=info"
+# json: one JSON object per line (machine-parseable, default).
+# key_value: human-readable single-line with `field=value` pairs after a
+#   `<ts> <level> <target>:` prefix.
+format = "json"
+
+[[upstreams]]
+name = "users-api"
+# Algorithms: round_robin (default), random, least_connections.
+balancer = "least_connections"
+members = [
+    { address = "127.0.0.1:8080" },
+    { address = "127.0.0.1:8081" },
+]
+
+# Passive health is on by default; override per pool to tighten/loosen.
+[upstreams.health]
+ejection_threshold = 5     # consecutive failures before ejection
+ejection_base_ms   = 1000  # initial backoff window
+ejection_max_ms    = 60000 # exponential cap
+
+# Active health checks (M6). Default: disabled. When enabled, a single probe
+# task per pool sends HTTP requests at `interval_ms` to each member's `path`.
+# Probe traffic does NOT count toward `quik_upstream_bytes_*` or
+# `quik_requests_total` — it lives entirely under `quik_active_health_check_*`.
+#
+# `initial_state = "unhealthy"` (default) is pessimistic — members don't take
+# traffic until the configured number of probes succeed. Use `"healthy"` for
+# optimistic startup when downtime is more expensive than the risk of routing
+# briefly to a not-yet-ready backend.
+[upstreams.active_health]
+enabled              = true
+path                 = "/healthz"
+method               = "GET"
+interval_ms          = 10000
+timeout_ms           = 2000
+healthy_threshold    = 2
+unhealthy_threshold  = 3
+expected_status      = 200          # or "200-299" for a range
+initial_state        = "unhealthy"
+
+# Drain timeout for member removal via the admin API (M6). When `DELETE
+# /admin/pools/{pool}/members/{id}` is called, the member transitions to
+# `draining`; the drain task waits up to this many ms for in-flight requests
+# to complete before forcibly removing it.
+[upstreams.drain]
+timeout_ms = 60000
+
+[[upstreams]]
+name = "billing-api"
+balancer = "round_robin"
+members = [
+    { address = "127.0.0.1:8090" },
+]
+
+# Exact-match route — takes precedence over any prefix.
+# /healthz on either api.example.com or *.api.internal hits users-api.
+[[routes]]
+hosts      = ["api.example.com", "*.api.internal"]
+methods    = ["GET", "HEAD"]
+path_exact = "/healthz"
+upstream   = "users-api"
+
+# Prefix-match route with strip_prefix module: requests to
+#   /api/v1/users/42  →  forwarded as  /users/42
+[[routes]]
+hosts        = ["api.example.com"]
+methods      = ["GET", "POST", "PUT", "DELETE"]
+path_prefix  = "/api/v1/users"
+strip_prefix = "/api/v1"
+timeout_ms   = 5000
+upstream     = "users-api"
+
+# Body-size cap module: reject uploads larger than 1 MiB before opening
+# an upstream connection. Useful for endpoints that shouldn't accept big payloads.
+[[routes]]
+hosts           = ["api.example.com"]
+methods         = ["POST"]
+path_prefix     = "/api/v1/billing"
+max_body_bytes  = 1_048_576
+timeout_ms      = 30000
+upstream        = "billing-api"
+
+# Catchall (no host filter, longest-prefix-loses).
+[[routes]]
+path_prefix = "/"
+upstream    = "users-api"
+
+# ─── Egress proxy (optional) ─────────────────────────────────────────────────
+# Opt-in second role on a separate port: quik also accepts HTTP CONNECT
+# requests and tunnels them to allowed destinations. Only CONNECT is
+# supported — appropriate for filtering outbound HTTPS. The destination
+# only sees the proxy's IP, so client identity isn't leaked at the network
+# layer; layer it with auth (below) for application-level audit.
+
+[egress]
+bind            = "0.0.0.0:3128"   # standard forward-proxy port
+default_action  = "deny"           # safer posture: deny anything not explicitly allowed
+sni_enforce     = false            # warn-only when SNI ≠ CONNECT target; flip to true to abort
+
+# Auth mode A: closed-network audit — extract the Basic username, *don't*
+# validate the password. The realm is shown in the browser/curl prompt.
+# Appropriate when the network itself is the trust boundary and you just
+# want to know who issued each request.
+[egress.auth]
+mode  = "basic_log_only"
+realm = "homelab egress"
+
+# Auth mode B: cryptographic — reuse an existing [[auth]] JWT block.
+# Replace the [egress.auth] block above with this one to switch.
+#   [egress.auth]
+#   mode             = "jwt"
+#   block            = "main"        # name of an [[auth]] block defined above
+#   originator_claim = "sub"         # default
+
+# First-match-wins rule list. A rule matches if any of its `hosts` OR any of
+# its `cidrs` hits the request. Hostname targets are also DNS-resolved and
+# checked against cidrs — so a deny rule on 169.254.0.0/16 catches a
+# metadata-service bypass attempted via DNS.
+
+[[egress.rules]]
+action = "allow"
+hosts  = ["*.github.com", "github.com", "*.cloudflare.com", "*.amazonaws.com"]
+
+[[egress.rules]]
+action = "allow"
+cidrs  = ["10.0.0.0/8", "192.168.0.0/16"]   # RFC1918 — internal services
+
+[[egress.rules]]
+action = "deny"
+cidrs  = [
+    "169.254.0.0/16",    # link-local incl. cloud metadata services
+    "fe80::/10",         # IPv6 link-local
+]
+
+# Anything not covered → default_action (deny).
+
+# ─── Auth ────────────────────────────────────────────────────────────────────
+# Named [[auth]] blocks. Routes opt in via `auth = "<name>"`.
+
+[[auth]]
+name             = "main"
+jwks_url         = "https://issuer.example.com/.well-known/jwks.json"
+issuer           = "https://issuer.example.com/"
+audience         = "users-api"
+algorithms       = ["RS256", "EdDSA"]
+required_claims  = ["sub"]
+
+# Project verified claims into upstream-bound headers. The mapped header
+# names are reserved — any inbound request that sets one of them is
+# rejected with 403 (rather than silently overwritten).
+inject_headers = [
+    { claim = "sub",       header = "x-auth-sub" },
+    { claim = "scope",     header = "x-auth-scope" },
+    { claim = "tenant_id", header = "x-tenant-id", required = true },
+    { claim = "roles",     header = "x-roles" },        # arrays joined with ","
+]
+
+# Auth-gated route. Tokens are verified against the JWKS above; the cache
+# refreshes on `kid` miss without blocking the hot path after warm-up.
+[[routes]]
+hosts        = ["api.example.com"]
+path_prefix  = "/secure"
+strip_prefix = "/secure"
+auth         = "main"
+upstream     = "users-api"
