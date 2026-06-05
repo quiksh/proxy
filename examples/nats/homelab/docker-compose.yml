@@ -1,0 +1,72 @@
+# Homelab single-node NATS service-registration demo.
+#
+#   ../../../scripts/gen-dev-cert.sh        # once: TLS cert into ../../../tls
+#   docker compose -f examples/nats/homelab/docker-compose.yml up -d --build
+#
+# Two backends self-register into NATS; quik watches the bucket and routes to
+# whichever are healthy. Try: stop checkout-1 and watch it drain out of the pool.
+name: quik-nats-homelab
+
+services:
+  nats:
+    image: nats:2.11
+    command: ["-c", "/etc/nats/nats.conf"]
+    volumes:
+      - ./nats.conf:/etc/nats/nats.conf:ro
+      - nats-data:/data
+    ports: ["127.0.0.1:4222:4222", "127.0.0.1:8222:8222"]  # loopback only
+
+  # One-shot: create the TTL+history bucket the watcher reconciles from.
+  nats-setup:
+    image: natsio/nats-box
+    depends_on: [nats]
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["nats -s nats:4222 kv add quik_registrations --ttl=30s --history=1 || true"]
+
+  quik:
+    build:
+      context: ../../..
+      dockerfile: examples/nats/Dockerfile.quik
+    depends_on: [nats-setup]
+    volumes:
+      - ./quik.toml:/etc/quik/config.toml:ro
+      - ../../../tls:/tls:ro
+    ports: ["8443:8443", "9090:9090"]
+
+  checkout-1:
+    build: { context: ../../.., dockerfile: examples/nats/Dockerfile.echo }
+    environment: { BIND_ADDR: "0.0.0.0:8080", BACKEND_NAME: checkout-1 }
+    networks:
+      default: { aliases: ["checkout-1.svc"] }
+  checkout-1-reg:
+    image: natsio/nats-box
+    depends_on: [nats-setup, checkout-1]
+    volumes: ["../register.sh:/scripts/register.sh:ro"]
+    entrypoint: ["/bin/sh", "/scripts/register.sh"]
+    environment:
+      NATS_URL: nats://nats:4222
+      NAMESPACE: shop
+      SERVICE: checkout
+      INSTANCE: checkout-1
+      ADDR: "checkout-1.svc:8080"
+
+  checkout-2:
+    build: { context: ../../.., dockerfile: examples/nats/Dockerfile.echo }
+    environment: { BIND_ADDR: "0.0.0.0:8080", BACKEND_NAME: checkout-2 }
+    networks:
+      default: { aliases: ["checkout-2.svc"] }
+  checkout-2-reg:
+    image: natsio/nats-box
+    depends_on: [nats-setup, checkout-2]
+    volumes: ["../register.sh:/scripts/register.sh:ro"]
+    entrypoint: ["/bin/sh", "/scripts/register.sh"]
+    environment:
+      NATS_URL: nats://nats:4222
+      NAMESPACE: shop
+      SERVICE: checkout
+      INSTANCE: checkout-2
+      ADDR: "checkout-2.svc:8080"
+
+volumes:
+  nats-data: {}

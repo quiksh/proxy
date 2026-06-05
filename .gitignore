@@ -4,3 +4,8 @@ scripts/test_keys/
 __pycache__/
 *.pyc
 *.bak
+# NATS demo credentials minted by examples/nats/nats/bootstrap-creds.sh —
+# never commit secrets.
+examples/nats/creds/
+examples/nats/nats/jwt/
+*.creds

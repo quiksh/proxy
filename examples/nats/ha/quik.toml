@@ -1,0 +1,42 @@
+# HA quik config. Identical for every quik instance — they all watch the same
+# replicated bucket and converge independently (NATS fans out one put to all).
+# `url` lists every cluster node; async-nats fails over between them.
+
+[listener]
+bind = "0.0.0.0:8443"
+
+[listener.tls]
+cert_path = "/tls/cert.pem"
+key_path  = "/tls/key.pem"
+
+[admin]
+bind = "0.0.0.0:9090"
+
+[nats]
+url    = "nats://nats-1:4222,nats://nats-2:4222,nats://nats-3:4222"
+bucket = "quik_registrations"
+
+[[upstreams]]
+name     = "checkout"
+balancer = "least_connections"
+
+[upstreams.nats]
+subject                   = "reg.shop.checkout.>"
+allow_addresses           = [".svc"]
+max_members               = 200       # sized for fleet × blue/green overlap
+max_instances_per_service = 200
+
+[upstreams.active_health]
+enabled             = true
+path                = "/healthz"
+interval_ms         = 1000
+healthy_threshold   = 1
+unhealthy_threshold = 2
+initial_state       = "unhealthy"
+
+[upstreams.drain]
+timeout_ms = 30000
+
+[[routes]]
+path_prefix = "/"
+upstream    = "checkout"

@@ -1,0 +1,48 @@
+# Homelab quik config: one NATS-backed pool, populated by self-registering
+# backends. Build quik with `--features nats` (see ../Dockerfile.quik).
+
+[listener]
+bind = "0.0.0.0:8443"
+
+[listener.tls]
+cert_path = "/tls/cert.pem"
+key_path  = "/tls/key.pem"
+
+[admin]
+bind = "0.0.0.0:9090"
+
+[nats]
+url    = "nats://nats:4222"          # tls:// once you add creds
+bucket = "quik_registrations"
+
+[[upstreams]]
+name     = "checkout"
+balancer = "least_connections"
+
+[upstreams.nats]
+subject         = "reg.shop.checkout.>"
+# Backends register as "<name>.svc:8080" (a docker network alias), so a single
+# ".svc" host-suffix admits the whole service group. In a real homelab this is
+# typically your LAN range, e.g. ["192.168.0.0/16"].
+allow_addresses = [".svc"]
+# Generous backstop — sized for blue/green overlap (blue+green ≈ 2× steady state).
+max_members               = 50
+max_instances_per_service = 50
+
+# Gate readiness: a freshly-registered member takes traffic only once it probes
+# healthy, so a not-yet-ready green instance isn't routed to. Fast cadence for
+# the demo.
+[upstreams.active_health]
+enabled             = true
+path                = "/healthz"
+interval_ms         = 1000
+healthy_threshold   = 1
+unhealthy_threshold = 2
+initial_state       = "unhealthy"
+
+[upstreams.drain]
+timeout_ms = 5000
+
+[[routes]]
+path_prefix = "/"
+upstream    = "checkout"
