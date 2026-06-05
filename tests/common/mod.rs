@@ -539,6 +539,8 @@ pub struct Backends {
     pub active_health: quik::config::ActiveHealthConfig,
     /// Drain timeout (default: 60s — but tests usually want shorter).
     pub drain: quik::config::DrainConfig,
+    /// NATS registration binding (default: none). Set via [`Backends::with_nats`].
+    pub nats: Option<quik::config::UpstreamNatsConfig>,
 }
 
 impl Backends {
@@ -552,6 +554,7 @@ impl Backends {
             http_version: UpstreamHttpVersion::H1,
             active_health: Default::default(),
             drain: Default::default(),
+            nats: None,
         }
     }
 
@@ -565,6 +568,7 @@ impl Backends {
             http_version: UpstreamHttpVersion::H1,
             active_health: Default::default(),
             drain: Default::default(),
+            nats: None,
         }
     }
 
@@ -577,6 +581,12 @@ impl Backends {
     /// Override drain timeout. Tests usually use 1–3 seconds.
     pub fn with_drain_timeout_ms(mut self, ms: u64) -> Self {
         self.drain = quik::config::DrainConfig { timeout_ms: ms };
+        self
+    }
+
+    /// Make this pool NATS-backed (used by the e2e_nats integration tests).
+    pub fn with_nats(mut self, nats: quik::config::UpstreamNatsConfig) -> Self {
+        self.nats = Some(nats);
         self
     }
 
@@ -610,11 +620,11 @@ pub fn route(path_prefix: &str, upstream: &str) -> RouteConfig {
 }
 
 pub async fn spawn_proxy(spec: ProxySpec) -> ProxyHandle {
-    spawn_proxy_full(spec, Mode::Edge, vec![], None, None).await
+    spawn_proxy_full(spec, Mode::Edge, vec![], None, None, None).await
 }
 
 pub async fn spawn_proxy_with_mode(spec: ProxySpec, mode: Mode) -> ProxyHandle {
-    spawn_proxy_full(spec, mode, vec![], None, None).await
+    spawn_proxy_full(spec, mode, vec![], None, None, None).await
 }
 
 /// Spawn a proxy with overridden listener limits. Used by the hardening
@@ -623,14 +633,14 @@ pub async fn spawn_proxy_with_limits(
     spec: ProxySpec,
     limits: quik::config::ListenerLimitsConfig,
 ) -> ProxyHandle {
-    spawn_proxy_full(spec, Mode::Edge, vec![], None, Some(limits)).await
+    spawn_proxy_full(spec, Mode::Edge, vec![], None, Some(limits), None).await
 }
 
 pub async fn spawn_proxy_with_auth(
     spec: ProxySpec,
     auth_blocks: Vec<AuthBlockConfig>,
 ) -> ProxyHandle {
-    spawn_proxy_full(spec, Mode::Edge, auth_blocks, None, None).await
+    spawn_proxy_full(spec, Mode::Edge, auth_blocks, None, None, None).await
 }
 
 /// Spawn a proxy with admin auth configured. Used by the admin-auth e2e
@@ -639,7 +649,13 @@ pub async fn spawn_proxy_with_admin_auth(
     spec: ProxySpec,
     admin_auth: quik::config::AdminAuthGroups,
 ) -> ProxyHandle {
-    spawn_proxy_full(spec, Mode::Edge, vec![], Some(admin_auth), None).await
+    spawn_proxy_full(spec, Mode::Edge, vec![], Some(admin_auth), None, None).await
+}
+
+/// Spawn a proxy with a top-level `[nats]` config — used by the e2e_nats tests.
+/// The watcher is only spawned in a `--features nats` build.
+pub async fn spawn_proxy_with_nats(spec: ProxySpec, nats: quik::config::NatsConfig) -> ProxyHandle {
+    spawn_proxy_full(spec, Mode::Edge, vec![], None, None, Some(nats)).await
 }
 
 async fn spawn_proxy_full(
@@ -648,6 +664,7 @@ async fn spawn_proxy_full(
     auth_blocks: Vec<AuthBlockConfig>,
     admin_auth: Option<quik::config::AdminAuthGroups>,
     limits: Option<quik::config::ListenerLimitsConfig>,
+    nats: Option<quik::config::NatsConfig>,
 ) -> ProxyHandle {
     let cert = gen_cert();
 
@@ -673,6 +690,7 @@ async fn spawn_proxy_full(
             active_health: p.active_health,
             drain: p.drain,
             pool: Default::default(),
+            nats: p.nats,
         })
         .collect();
 
@@ -696,6 +714,7 @@ async fn spawn_proxy_full(
         },
         shutdown: ShutdownConfig {
             drain_grace_seconds: 3,
+            pre_drain_grace_seconds: 0,
         },
         logging: LoggingConfig {
             level: "warn".to_string(),
@@ -705,6 +724,7 @@ async fn spawn_proxy_full(
         routes,
         auth: auth_blocks,
         egress: None,
+        nats,
     };
 
     // IMPORTANT: install the prometheus recorder BEFORE building the pool —
@@ -722,7 +742,10 @@ async fn spawn_proxy_full(
     let addr = proxy_listener.local_addr().unwrap();
     let admin_addr = admin_listener.local_addr().unwrap();
 
-    let shutdown = Coordinator::new(cfg.shutdown.drain_grace_seconds);
+    let shutdown = Coordinator::new(
+        cfg.shutdown.drain_grace_seconds,
+        cfg.shutdown.pre_drain_grace_seconds,
+    );
 
     // Build the auth registry. For tests we use the skip_verify JWKS client
     // so the harness's self-signed-or-plaintext JWKS server is reachable.
@@ -743,6 +766,16 @@ async fn spawn_proxy_full(
                 shutdown.clone(),
             ));
         }
+    }
+
+    // Mirror main.rs: the NATS watcher (only in a `--features nats` build).
+    #[cfg(feature = "nats")]
+    if let Some(nats_cfg) = cfg.nats.clone() {
+        tokio::spawn(quik::upstream::nats::run_watcher(
+            upstreams.clone(),
+            nats_cfg,
+            shutdown.clone(),
+        ));
     }
 
     // Admin auth is None/None for tests by default — e2e tests for auth

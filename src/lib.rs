@@ -33,3 +33,8 @@ pub mod routing;
 pub mod shutdown;
 pub mod tls;
 pub mod upstream;
+
+/// Re-export of the NATS client (feature `nats`) so integration tests can drive
+/// the registry without declaring async-nats as a separate dev-dependency.
+#[cfg(feature = "nats")]
+pub use async_nats;

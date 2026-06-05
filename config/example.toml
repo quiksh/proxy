@@ -47,6 +47,12 @@ bind = "127.0.0.1:9090"
 
 [shutdown]
 drain_grace_seconds = 30
+# Edge-withdraw grace (M7). On SIGTERM, /healthz flips to 503 immediately but
+# the proxy keeps accepting for this long *before* the drain begins — giving a
+# perimeter (e.g. Cloudflare) time to notice the 503 and stop routing, so
+# in-flight requests aren't cut. Default 0 (disabled). A drain-aware edge
+# sidecar that watches /healthz is all that's needed on top of this.
+pre_drain_grace_seconds = 0
 
 [logging]
 level  = "info,quik=info"

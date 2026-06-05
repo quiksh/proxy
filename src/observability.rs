@@ -167,6 +167,24 @@ pub fn init_metrics() -> Result<PrometheusHandle> {
         "Wall-clock per active health probe"
     );
 
+    // NATS service registration (feature `nats`).
+    metrics::describe_gauge!(
+        "quik_nats_connected",
+        "NATS connection state (1 connected, 0 disconnected). 0 means membership is frozen at last-known."
+    );
+    metrics::describe_counter!(
+        "quik_nats_reconcile_total",
+        "NATS reconcile actions applied to pool membership, by action (add|remove)"
+    );
+    metrics::describe_counter!(
+        "quik_nats_watch_events_total",
+        "KV watch events received, by op (put|delete|purge)"
+    );
+    metrics::describe_counter!(
+        "quik_nats_registration_rejected_total",
+        "Registrations refused by reason: address_not_allowed (H1) | pool_member_cap | service_quota (H2)"
+    );
+
     Ok(handle)
 }
 

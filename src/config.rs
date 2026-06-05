@@ -35,6 +35,57 @@ pub struct Config {
     /// rules. Absent → no egress listener.
     #[serde(default)]
     pub egress: Option<EgressConfig>,
+    /// Optional NATS-backed service registration. Only *acted upon* in a
+    /// `--features nats` build; parsed unconditionally so a config is portable
+    /// and a feature/config mismatch fails fast (see `validate`).
+    #[serde(default)]
+    pub nats: Option<NatsConfig>,
+}
+
+/// Connection settings for the NATS service-registration watcher.
+/// See `docs/service-registration.md`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NatsConfig {
+    /// NATS server URL, e.g. `nats://host:4222` or `tls://host:4222`.
+    pub url: String,
+    /// JetStream KV bucket holding registrations.
+    pub bucket: String,
+    /// Path to a NATS credentials file (decentralised JWT). Omit for no-auth
+    /// (local demo) or when credentials are supplied another way.
+    #[serde(default)]
+    pub creds_file: Option<PathBuf>,
+    /// Seconds between reconnect attempts while the connection is down.
+    #[serde(default = "default_nats_reconnect_secs")]
+    pub reconnect_secs: u64,
+}
+
+fn default_nats_reconnect_secs() -> u64 {
+    5
+}
+
+/// Per-pool NATS registration binding. A pool carrying this block is populated
+/// from the KV subtree `subject`; backends self-register there. The hardening
+/// controls live here: the registrable-address allow-list (H1) and the member
+/// caps (H2).
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpstreamNatsConfig {
+    /// KV key subject filter feeding this pool, e.g. `reg.shop.checkout.>`.
+    pub subject: String,
+    /// Registrable-address allow-list (H1): CIDR (`10.0.0.0/8`) or host-suffix
+    /// (`.svc.cluster.local`) entries. A self-asserted address outside this set
+    /// is rejected. Required (and non-empty) — a pool admitting self-registered
+    /// members must state where they may live; this fails *safe*.
+    #[serde(default)]
+    pub allow_addresses: Vec<String>,
+    /// Generous backstop cap on total members in this pool (H2). `None` ⇒ no
+    /// cap. Size it well above the real fleet — a tight cap fails *unsafe*
+    /// (it locks out legitimate new capacity). Pair with short TTLs + alerting.
+    #[serde(default)]
+    pub max_members: Option<u32>,
+    /// Cap on instances per service subtree, i.e. per `reg.<ns>.<service>.*`
+    /// (H2 — the surgical anti-abuse control). `None` ⇒ no cap.
+    #[serde(default)]
+    pub max_instances_per_service: Option<u32>,
 }
 
 /// Forward / egress proxy listener configuration.
@@ -318,18 +369,30 @@ pub enum AdminAuthConfig {
 pub struct ShutdownConfig {
     #[serde(default = "default_drain_secs")]
     pub drain_grace_seconds: u64,
+    /// Edge-withdraw grace. On SIGTERM, `/healthz` flips to 503 immediately but
+    /// the proxy keeps accepting for this long *before* the local drain begins,
+    /// giving a perimeter (e.g. Cloudflare) time to notice the 503 and stop
+    /// routing. See `docs/graceful-shutdown.md`. Default: 0 — disabled, so behaviour
+    /// matches a proxy without an edge in front (drain begins immediately).
+    #[serde(default = "default_pre_drain_secs")]
+    pub pre_drain_grace_seconds: u64,
 }
 
 impl Default for ShutdownConfig {
     fn default() -> Self {
         Self {
             drain_grace_seconds: default_drain_secs(),
+            pre_drain_grace_seconds: default_pre_drain_secs(),
         }
     }
 }
 
 fn default_drain_secs() -> u64 {
     30
+}
+
+fn default_pre_drain_secs() -> u64 {
+    0
 }
 
 #[derive(Debug, Deserialize)]
@@ -367,6 +430,10 @@ fn default_log_level() -> String {
 #[derive(Debug, Deserialize)]
 pub struct UpstreamPoolConfig {
     pub name: String,
+    /// Static members. Optional — a NATS-backed pool (`[upstreams.nats]`) omits
+    /// these and is populated at runtime. `validate()` rejects an empty pool
+    /// that has no runtime source.
+    #[serde(default)]
     pub members: Vec<UpstreamMember>,
     #[serde(default)]
     pub balancer: BalancerKind,
@@ -390,6 +457,10 @@ pub struct UpstreamPoolConfig {
     /// Connection-pool tuning for the proxy→upstream hyper client.
     #[serde(default)]
     pub pool: UpstreamClientPoolConfig,
+    /// Optional NATS registration binding. When set, this pool is populated
+    /// from a KV subtree at runtime and may start with no static `members`.
+    #[serde(default)]
+    pub nats: Option<UpstreamNatsConfig>,
 }
 
 /// Per-pool tuning of the hyper client's idle connection pool. Defaults
@@ -822,9 +893,53 @@ fn validate(cfg: &Config) -> Result<()> {
             anyhow::bail!("route '{}': strip_prefix must start with '/'", r.summary());
         }
     }
+    // A binary built without the `nats` feature cannot act on NATS config —
+    // fail fast rather than silently leaving NATS-backed pools empty forever.
+    #[cfg(not(feature = "nats"))]
+    {
+        if cfg.nats.is_some() || cfg.upstreams.iter().any(|u| u.nats.is_some()) {
+            anyhow::bail!(
+                "config uses [nats]/[upstreams.nats] but this binary was built \
+                 without the `nats` feature (rebuild with --features nats)"
+            );
+        }
+    }
+    // A pool can only register members if there's a NATS connection to watch.
+    if cfg.upstreams.iter().any(|u| u.nats.is_some()) && cfg.nats.is_none() {
+        anyhow::bail!("[upstreams.nats] is set but the top-level [nats] block is missing");
+    }
+
     for u in &cfg.upstreams {
-        if u.members.is_empty() {
+        // A pool may start empty only if it is populated from NATS at runtime.
+        if u.members.is_empty() && u.nats.is_none() {
             anyhow::bail!("upstream pool '{}' has no members", u.name);
+        }
+        if let Some(n) = &u.nats {
+            if n.subject.trim().is_empty() {
+                anyhow::bail!(
+                    "upstream pool '{}': [upstreams.nats].subject is empty",
+                    u.name
+                );
+            }
+            // Must be a subtree wildcard, not a literal key — otherwise the
+            // watcher silently matches nothing useful (a forgotten `.>`).
+            if !n.subject.ends_with('>') && !n.subject.ends_with('*') {
+                anyhow::bail!(
+                    "upstream pool '{}': [upstreams.nats].subject must end with a wildcard \
+                     token (e.g. 'reg.<ns>.<service>.>'), not a literal key",
+                    u.name
+                );
+            }
+            // H1 must be explicit: an empty allow-list would admit any
+            // self-asserted address (SSRF / traffic hijack). Force the operator
+            // to state where members may live.
+            if n.allow_addresses.is_empty() {
+                anyhow::bail!(
+                    "upstream pool '{}': [upstreams.nats].allow_addresses must list at least \
+                     one CIDR or host-suffix — self-registered addresses are otherwise unbounded",
+                    u.name
+                );
+            }
         }
         for m in &u.members {
             if m.scheme != "http" && m.scheme != "https" {

@@ -77,3 +77,66 @@ async fn in_flight_request_completes_after_drain() {
     // Strict equality on a known field to confirm body actually streamed.
     assert!(body.starts_with(&Bytes::from_static(b"{\"backend\":\"a\"")));
 }
+
+#[tokio::test]
+async fn pre_drain_withdraws_health_before_listener_stops() {
+    // M7 Part B: the edge-withdraw ordering. When the pre-drain phase begins,
+    // /healthz must flip to 503 *while the proxy keeps accepting* — so a
+    // perimeter health check withdraws traffic before in-flight is cut. Only
+    // when the actual drain begins should the listener stop accepting.
+    let backend = Backend::spawn("a").await;
+    let proxy = spawn_proxy(ProxySpec {
+        pools: vec![common::Backends::http("p", vec![backend.addr])],
+        routes: vec![route("/", "p")],
+    })
+    .await;
+
+    let proxy_url = format!("https://localhost:{}/ping", proxy.addr.port());
+    let healthz = format!("http://{}/healthz", proxy.admin_addr);
+    let admin = reqwest::Client::new();
+
+    // Fresh-connection helper so we never reuse a pooled socket — each call
+    // genuinely re-tests whether the listener still accepts.
+    let fresh = || {
+        reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .connect_timeout(Duration::from_secs(2))
+            .build()
+            .unwrap()
+    };
+
+    // Baseline: healthy and serving.
+    assert_eq!(
+        admin.get(&healthz).send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        fresh().get(&proxy_url).send().await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    // Begin the edge-withdraw phase.
+    proxy.shutdown.begin_pre_drain();
+
+    // /healthz now reports 503 …
+    assert_eq!(
+        admin.get(&healthz).send().await.unwrap().status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "healthz must report draining as soon as pre-drain begins"
+    );
+    // … but the proxy is STILL accepting new connections (the ordering point).
+    assert_eq!(
+        fresh().get(&proxy_url).send().await.unwrap().status(),
+        StatusCode::OK,
+        "listener must keep accepting during the edge-withdraw grace"
+    );
+
+    // Now the real drain begins → the listener stops accepting.
+    proxy.shutdown.trigger_drain();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let res = fresh().get(&proxy_url).send().await;
+    assert!(
+        res.is_err(),
+        "fresh request should fail once the drain phase stops the listener, got: {res:?}"
+    );
+}

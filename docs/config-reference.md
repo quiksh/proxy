@@ -118,12 +118,14 @@ whenever any auth group is `mtls`.
 
 ```toml
 [shutdown]
-drain_grace_seconds = 30
+drain_grace_seconds     = 30
+pre_drain_grace_seconds = 0
 ```
 
-| Field                  | Default | Notes                                          |
-|------------------------|---------|------------------------------------------------|
-| `drain_grace_seconds`  | `30`    | First SIGTERM/SIGINT: stop accepting, allow in-flight up to this long. Second signal: force exit. |
+| Field                     | Default | Notes                                          |
+|---------------------------|---------|------------------------------------------------|
+| `drain_grace_seconds`     | `30`    | First SIGTERM/SIGINT: stop accepting, allow in-flight up to this long. Second signal: force exit. |
+| `pre_drain_grace_seconds` | `0`     | Edge-withdraw grace. On SIGTERM `/healthz` returns 503 immediately but the proxy keeps accepting for this long *before* the drain begins, so a perimeter notices and stops routing first. `0` = disabled. |
 
 ## `[logging]`
 
@@ -385,3 +387,54 @@ originator_claim = "sub"            # default
 A rule matches if **any** of its hosts **or any** of its cidrs hits the
 target. First match wins. Hostname targets are also resolved via DNS so
 CIDR-based denies catch DNS-aliased bypasses.
+
+## `[nats]`
+
+Optional NATS-backed service registration. **Only acted upon in a build with
+`--features nats`** — a config that uses `[nats]`/`[upstreams.nats]` on a default
+binary fails boot loudly. See [service-registration.md](service-registration.md).
+
+```toml
+[nats]
+url        = "tls://nats:4222"
+bucket     = "quik_registrations"
+creds_file = "/etc/quik/quik.creds"
+```
+
+| Field            | Default | Notes                                                        |
+|------------------|---------|--------------------------------------------------------------|
+| `url`            | —       | Required. `nats://…` or `tls://…`.                           |
+| `bucket`         | —       | Required. JetStream KV bucket holding registrations.         |
+| `creds_file`     | none    | Path to a decentralised-JWT `.creds` file. Omit for no-auth (local only). |
+| `reconnect_secs` | `5`     | Pause between reconnect attempts while NATS is unreachable.   |
+
+When NATS is down (at boot or later) the proxy serves last-known / static-config
+membership and keeps retrying — it never fails on the NATS dependency, and a
+disconnect never flushes members.
+
+### `[upstreams.nats]`
+
+Per-pool binding that makes a pool NATS-backed. A pool with this block may start
+with no static `members`.
+
+```toml
+[[upstreams]]
+name = "checkout"
+
+[upstreams.nats]
+subject                    = "reg.shop.checkout.>"
+allow_addresses            = ["10.0.0.0/8", ".svc.cluster.local"]
+max_members                = 500
+max_instances_per_service  = 50
+```
+
+| Field                       | Default | Notes                                                            |
+|-----------------------------|---------|------------------------------------------------------------------|
+| `subject`                   | —       | Required. KV subject subtree feeding this pool, e.g. `reg.shop.checkout.>`. |
+| `allow_addresses`           | —       | **Required, non-empty** (H1). CIDR (`10.0.0.0/8`), bare IP, or host-suffix (`.svc.local`). A self-asserted address outside this set is rejected. Fails *safe*. |
+| `max_members`               | none    | Backstop cap on total pool members (H2). Size **well above** the real fleet — a tight cap fails *unsafe* (locks out scale-up). |
+| `max_instances_per_service` | none    | Cap per `reg.<ns>.<service>.*` (H2, the surgical control). |
+
+The operator-override subtree (`override.<…>`, derived from `subject`) is watched
+automatically: an `override` key drains/suppresses the matching member
+(operator-wins, durable across restart).
