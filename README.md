@@ -33,10 +33,17 @@ small HTTP admin API.
   optional **active health probes**.
 - **Online member management** via a separate admin listener: add, drain,
   undrain, or remove members without restarting.
+- **Service registration** (optional `nats` feature): backends self-register
+  into a NATS JetStream KV bucket and quik reconciles them into the pool — with
+  a registrable-address allow-list, member caps, and operator overrides. See
+  [docs/service-registration.md](docs/service-registration.md).
 - **Optional egress (forward) proxy** mode — HTTP CONNECT with host/CIDR
   policy and SNI verification.
 - **Prometheus metrics** + **structured JSON / key-value logs**.
-- **Graceful drain** on `SIGTERM`/`SIGINT`; force-exit on a second signal.
+- **Graceful shutdown** on `SIGTERM`/`SIGINT` — drains in-flight requests, with
+  an optional edge-withdraw grace so a perimeter stops routing first
+  ([docs/graceful-shutdown.md](docs/graceful-shutdown.md)); force-exit on a
+  second signal.
 
 ## What it isn't
 
@@ -61,6 +68,8 @@ microbenchmarks.
 | Multi-backend production reverse proxy  | [docs/ha-reverse-proxy.md](docs/ha-reverse-proxy.md) |
 | Outbound HTTP CONNECT egress filter   | [docs/forward-proxy.md](docs/forward-proxy.md)    |
 | Managing pools on a running proxy     | [docs/admin-api.md](docs/admin-api.md)            |
+| Backends that self-register (NATS)    | [docs/service-registration.md](docs/service-registration.md) · [examples/nats](examples/nats) |
+| Graceful shutdown behind a perimeter  | [docs/graceful-shutdown.md](docs/graceful-shutdown.md) |
 | Exposing quik outside a CDN           | [docs/hardening.md](docs/hardening.md)            |
 | The full config schema                | [docs/config-reference.md](docs/config-reference.md) |
 
@@ -116,6 +125,15 @@ make ci             # fmt-check + clippy + tests, as CI runs them
 
 Requires Rust 1.85+ (edition 2024). No system dependencies beyond a C linker.
 
+### Optional features
+
+quik builds lean by default. NATS-based service registration is behind a cargo
+feature so the default binary carries no NATS dependency:
+
+```bash
+cargo build --release --features nats     # adds the NATS registration watcher
+```
+
 ## Project layout
 
 ```
@@ -123,6 +141,7 @@ src/                    proxy core
   proxy/                request handler, per-request span, modules
   routing/              route table — exact > prefix, longest-prefix-first
   upstream/             pools, balancers, passive + active health, drain
+    nats/               NATS registration watcher (feature `nats`)
   auth/                 JWT validation, JWKS cache, claim injection
   admin/                admin listener + /admin/pools API
   egress/               optional HTTP CONNECT forward proxy
@@ -136,6 +155,7 @@ config/                 example configurations
 
 tests/                  integration tests
 examples/               echo_backend, load_test
+  nats/                 service-registration demos (homelab + HA)
 benches/                criterion benchmarks
 docs/                   user-facing documentation
 ```
