@@ -292,7 +292,11 @@ async fn drain_member_without_removal_stops_new_traffic() {
 #[tokio::test]
 async fn undrain_restores_routing() {
     let backend_a = Backend::spawn("a").await;
-    let backend_b = Backend::spawn("b").await;
+    // b responds slowly so we can hold one request in-flight against it. The
+    // drain task's first poll is immediate, so a member with zero in-flight is
+    // marked `drained` almost at once — undrain would then race and lose. An
+    // in-flight request keeps b `draining` deterministically until we undrain.
+    let backend_b = Backend::spawn_with_delay("b", Duration::from_millis(500)).await;
     let proxy = spawn_proxy(ProxySpec {
         pools: vec![Backends::http(
             "pool-a",
@@ -304,9 +308,26 @@ async fn undrain_restores_routing() {
     let id_b = backend_b.addr.to_string();
     let encoded = urlencode(&id_b);
 
+    let proxy_client = https_client();
+    // Warm-up consumes round-robin index 0 (→ backend_a), so the next pick
+    // lands deterministically on b.
+    let _ = proxy_client
+        .get(proxy_url(proxy.addr, "/warmup"))
+        .send()
+        .await
+        .unwrap();
+    // Pin one in-flight request onto b (index 1). Held open by b's delay.
+    let pin = {
+        let c = proxy_client.clone();
+        let addr = proxy.addr;
+        tokio::spawn(async move { c.get(proxy_url(addr, "/pin")).send().await })
+    };
+    // Let the proxy pick b and increment its inflight counter.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
     let client = reqwest::Client::new();
-    // Drain b.
-    client
+    // Drain b — it stays draining because the pinned request is in-flight.
+    let drain_resp = client
         .post(admin_url(
             proxy.admin_addr,
             &format!("/admin/pools/pool-a/members/{encoded}/drain"),
@@ -314,7 +335,8 @@ async fn undrain_restores_routing() {
         .send()
         .await
         .unwrap();
-    // Undrain b.
+    assert_eq!(drain_resp.status(), StatusCode::ACCEPTED);
+    // Undrain b — succeeds because it's still draining, not drained.
     let resp = client
         .post(admin_url(
             proxy.admin_addr,
@@ -327,20 +349,26 @@ async fn undrain_restores_routing() {
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["lifecycle"], "active");
 
-    // Backend_b should now receive traffic again. Use plenty of requests so
-    // a one-pool-counter-offset doesn't make this flaky under parallel tests.
-    let proxy_client = https_client();
-    for _ in 0..40 {
-        let _ = proxy_client
-            .get(proxy_url(proxy.addr, "/hello"))
-            .send()
-            .await
-            .unwrap();
+    let _ = pin.await;
+    let b_before = backend_b.calls().len();
+
+    // Backend_b should now receive traffic again. Issue the probe requests
+    // concurrently so b's per-request delay doesn't serialise the check.
+    let mut handles = Vec::new();
+    for _ in 0..16 {
+        let c = proxy_client.clone();
+        let addr = proxy.addr;
+        handles.push(tokio::spawn(async move {
+            let _ = c.get(proxy_url(addr, "/hello")).send().await;
+        }));
     }
-    let calls_b = backend_b.calls().len();
+    for h in handles {
+        let _ = h.await;
+    }
+    let calls_b = backend_b.calls().len() - b_before;
     assert!(
-        calls_b >= 5,
-        "undrained member should resume taking traffic (got {calls_b}/40)"
+        calls_b >= 3,
+        "undrained member should resume taking traffic (got {calls_b}/16)"
     );
 }
 
