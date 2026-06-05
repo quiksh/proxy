@@ -35,6 +35,8 @@ services:
     ports: ["8443:8443", "9090:9090"]
 
   checkout-1:
+    # Tag the built image so provision.sh can start more backends from it.
+    image: quik-echo:demo
     build: { context: ../../.., dockerfile: examples/nats/Dockerfile.echo }
     environment: { BIND_ADDR: "0.0.0.0:8080", BACKEND_NAME: checkout-1 }
     networks:
@@ -52,6 +54,7 @@ services:
       ADDR: "checkout-1.svc:8080"
 
   checkout-2:
+    image: quik-echo:demo
     build: { context: ../../.., dockerfile: examples/nats/Dockerfile.echo }
     environment: { BIND_ADDR: "0.0.0.0:8080", BACKEND_NAME: checkout-2 }
     networks:
@@ -70,3 +73,8 @@ services:
 
 volumes:
   nats-data: {}
+
+# Explicit network name so provision.sh can attach ad-hoc backends to it.
+networks:
+  default:
+    name: quik-nats
