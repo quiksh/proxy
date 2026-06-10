@@ -42,14 +42,13 @@ services:
     networks:
       default: { aliases: ["checkout-1.svc"] }
   checkout-1-reg:
-    image: natsio/nats-box
+    # The quik-register agent: health-gated registration. Tag it so provision.sh
+    # can start registrars for ad-hoc backends.
+    image: quik-register:demo
+    build: { context: ../../.., dockerfile: examples/nats/Dockerfile.register }
     depends_on: [nats-setup, checkout-1]
-    volumes: ["../register.sh:/scripts/register.sh:ro"]
-    entrypoint: ["/bin/sh", "/scripts/register.sh"]
+    volumes: ["../quik-register.toml:/etc/quik-register/quik-register.toml:ro"]
     environment:
-      NATS_URL: nats://nats:4222
-      NAMESPACE: shop
-      SERVICE: checkout
       INSTANCE: checkout-1
       ADDR: "checkout-1.svc:8080"
 
@@ -60,14 +59,11 @@ services:
     networks:
       default: { aliases: ["checkout-2.svc"] }
   checkout-2-reg:
-    image: natsio/nats-box
+    image: quik-register:demo
+    build: { context: ../../.., dockerfile: examples/nats/Dockerfile.register }
     depends_on: [nats-setup, checkout-2]
-    volumes: ["../register.sh:/scripts/register.sh:ro"]
-    entrypoint: ["/bin/sh", "/scripts/register.sh"]
+    volumes: ["../quik-register.toml:/etc/quik-register/quik-register.toml:ro"]
     environment:
-      NATS_URL: nats://nats:4222
-      NAMESPACE: shop
-      SERVICE: checkout
       INSTANCE: checkout-2
       ADDR: "checkout-2.svc:8080"
 

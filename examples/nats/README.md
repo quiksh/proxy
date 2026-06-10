@@ -12,9 +12,13 @@ Two runnable stacks:
 | [`ha/`](ha/) | 3-node NATS cluster (R3 bucket), 2 quik | production-shaped |
 
 Both build quik from this repo with [`Dockerfile.quik`](Dockerfile.quik)
-(`cargo build --release --features nats`). Backends register via
-[`register.sh`](register.sh) — a ~10-line heartbeat loop; a real service would do
-the same in-process with `async-nats`.
+(`cargo build --release --features nats`). Each backend runs a **`quik-register`**
+sidecar (the agent in [`quik-register/`](../../quik-register)) configured by
+[`quik-register.toml`](quik-register.toml): it health-checks the service and
+registers it while healthy, deregisters it when it fails or on shutdown, and
+heartbeats the lease in between. ([`register.sh`](register.sh) is a ~10-line
+shell alternative for a no-build demo; a real service could also register
+in-process with `async-nats`.)
 
 ## Quick start (homelab)
 

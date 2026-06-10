@@ -20,9 +20,9 @@ x-backend: &backend
   environment: { BIND_ADDR: "0.0.0.0:8080" }
 
 x-registrar: &registrar
-  image: natsio/nats-box
-  volumes: ["../register.sh:/scripts/register.sh:ro"]
-  entrypoint: ["/bin/sh", "/scripts/register.sh"]
+  image: quik-register:demo
+  build: { context: ../../.., dockerfile: examples/nats/Dockerfile.register }
+  volumes: ["../quik-register.toml:/etc/quik-register/quik-register.toml:ro"]
 
 services:
   nats-1: { <<: *nats }

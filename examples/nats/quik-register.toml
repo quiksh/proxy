@@ -1,0 +1,30 @@
+# Sample quik-register config, shared by both demos. Per-instance fields are
+# env-templated so one file serves every replica (each registrar container sets
+# INSTANCE + ADDR). `${VAR:-default}` falls back when the var is unset.
+
+[nats]
+url    = "${NATS_URL:-nats://nats:4222}"
+bucket = "${BUCKET:-quik_registrations}"
+# creds_file = "/etc/quik-register/nats.creds"   # decentralised-JWT; use tls:// url
+
+[service]
+namespace = "${NAMESPACE:-shop}"
+service   = "${SERVICE:-checkout}"
+instance  = "${INSTANCE}"          # unique per replica
+address   = "${ADDR}"              # what quik routes to, e.g. checkout-1.svc:8080
+scheme    = "http"
+# weight  = 1
+# metadata = { zone = "rack-2", version = "v1" }
+
+[lease]
+ttl_secs = 30                      # key expires if not refreshed within this
+
+[health]
+protocol            = "http"       # http | https | tcp
+endpoint            = "/healthz"
+method              = "GET"
+timeout_ms          = 2000
+interval_secs       = 5            # probe + heartbeat cadence (must be < ttl_secs)
+healthy_threshold   = 1            # consecutive OK before (re)registering
+unhealthy_threshold = 2            # consecutive fails before deregistering
+startup_grace_secs  = 10           # warm-up window: failures don't deregister

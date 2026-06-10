@@ -35,7 +35,9 @@ curl -s localhost:9090/admin/pools/checkout | jq '.members[].address'
 #    "checkout-2.svc:8080"
 ```
 
-Those two registered themselves on startup (each ships a registrar sidecar). If
+Those two registered themselves on startup (each runs a `quik-register` sidecar
+that health-checks the backend and registers it while healthy — config in
+[`../quik-register.toml`](../quik-register.toml)). If
 the list is empty for a second, the active-health probe hasn't marked them
 healthy yet — re-run.
 
