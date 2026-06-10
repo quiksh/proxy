@@ -1,6 +1,7 @@
 # The repo's echo_backend example, as a container — so the demos run without a
 # private image. Build context is the repo root.
-FROM rust:1.85-slim AS build
+# current stable; deps need > 1.85. bookworm matches the runtime glibc
+FROM rust:1-slim-bookworm AS build
 WORKDIR /src
 COPY . .
 RUN cargo build --release --example echo_backend
