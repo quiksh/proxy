@@ -91,16 +91,33 @@ nats kv del quik_registrations override.shop.checkout.checkout-3
 Stopping its registrar deletes the NATS key, so quik drains it (in-flight
 finishes) before the container stops.
 
-## 7. Failure drill — a backend dies hard
-
-Kill a backend without deregistering and watch the lease expire it (no graceful
-delete, so it lingers up to one 30 s TTL, then the watcher reaps it):
+## 7. Failure drill — a backend dies (no graceful deregister)
 
 ```sh
-docker kill checkout-2
-# ~30s later it's gone:
-curl -s localhost:9090/admin/pools/checkout | jq '.members[].address'
+docker kill checkout-2     # the service process; its registrar keeps running
 ```
+
+Two independent mechanisms take it out of rotation:
+
+- **Immediately:** quik's active-health probe to `checkout-2.svc:8080` starts
+  failing, so quik marks it unhealthy and **stops routing to it** within a
+  couple of probe intervals — even while it's still listed as a member.
+  ```sh
+  for i in $(seq 8); do curl -sk https://localhost:8443/ | jq -r .backend; done   # no checkout-2
+  ```
+- **Within one TTL (~30 s):** the registrar's heartbeat is health-gated, so once
+  the service stops answering it stops refreshing the key; the lease expires and
+  the watcher removes the member entirely.
+  ```sh
+  curl -s localhost:9090/admin/pools/checkout | jq '.members[].address'   # checkout-2 gone
+  ```
+
+These are the two halves of the liveness model: the **lease TTL** (refreshed by
+the registrar) reaps anything that stops heartbeating — a dead service *or* a
+dead sidecar — and quik's **active health** is the independent backstop that
+stops traffic from quik's own vantage point, regardless of what the registry
+says. (Kill the *sidecar* instead — `docker kill checkout-2-reg` — and the same
+TTL expiry removes it, since nothing refreshes the key.)
 
 ## 8. Metrics
 

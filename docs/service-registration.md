@@ -184,14 +184,35 @@ never re-adds a member with a live override.
 
 ---
 
-## 6. Liveness / TTL
+## 6. Liveness — three layers
 
-- TTL (e.g. 30 s) with backend refresh at ~TTL/3. A heartbeat is a re-`put`; no
-  separate subject.
-- Per-key TTL needs NATS server **≥ 2.11**; confirm the target version, else use
-  a short bucket-level max-age.
-- Complementary with active health: NATS answers "alive", probes answer
-  "healthy" — keep both.
+Liveness is defended at three levels; use all three.
+
+1. **Lease TTL (the registry's liveness).** The key has a TTL (e.g. 30 s) and the
+   registrant refreshes it at ~TTL/3 with a re-`put` (no separate subject). If
+   the registrant stops heartbeating — because the **registrant/sidecar itself
+   died**, or because it deliberately stopped — the lease expires and the watcher
+   reaps the member. Per-key TTL needs NATS server **≥ 2.11**; otherwise use a
+   short bucket-level max-age.
+2. **Health-gated heartbeat (the service's liveness).** The heartbeat must be
+   *conditional on the service being healthy*, not unconditional — otherwise a
+   **dead service with a live sidecar** keeps getting heartbeated and stays
+   registered. The registrant health-checks its service and only refreshes the
+   key while it answers; once the service fails, it stops refreshing and the
+   lease (layer 1) expires it. Gating-then-letting-the-TTL-expire is naturally
+   debounced — a brief blip that recovers within the TTL never deregisters.
+   (The example registrar, `examples/nats/register.sh`, does exactly this.)
+3. **quik active health (the data-path backstop).** Independently of the
+   registry, quik probes each member from its *own* vantage point
+   (`[upstreams.active_health]`). This catches failure modes the registrant
+   can't see — a network partition between quik and the backend, or a buggy
+   registrant that wrongly keeps a dead service registered — and stops routing
+   to it even while it's still listed as a member. NATS answers "registered and
+   heartbeating"; active health answers "actually reachable and serving".
+
+The distinction matters: a member can be **registered** (in the member list) but
+not **routable** (active health failing) — traffic stops at layer 3 immediately,
+while layers 1–2 remove it from the list within a TTL.
 
 ## 7. Failure mode: disconnect = freeze; startup = fail-static
 
