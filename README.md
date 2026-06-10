@@ -158,7 +158,13 @@ examples/               echo_backend, load_test
   nats/                 service-registration demos (homelab + HA)
 benches/                criterion benchmarks
 docs/                   user-facing documentation
+
+quik-register/          service-registration sidecar agent (workspace member)
 ```
+
+This is a Cargo workspace: the `quik` proxy (root) plus `quik-register`, a small
+sidecar that health-checks a backend and registers it into NATS for the proxy to
+pick up. `make build` / `make test` cover both.
 
 ## Releases
 

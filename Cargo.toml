@@ -1,3 +1,7 @@
+[workspace]
+# The proxy (root package) plus the optional service-registration sidecar agent.
+members = ["quik-register"]
+
 [package]
 name = "quik"
 # Release version is managed by git tags / the Release workflow, not here.

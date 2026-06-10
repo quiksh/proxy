@@ -198,10 +198,13 @@ Liveness is defended at three levels; use all three.
    *conditional on the service being healthy*, not unconditional — otherwise a
    **dead service with a live sidecar** keeps getting heartbeated and stays
    registered. The registrant health-checks its service and only refreshes the
-   key while it answers; once the service fails, it stops refreshing and the
-   lease (layer 1) expires it. Gating-then-letting-the-TTL-expire is naturally
-   debounced — a brief blip that recovers within the TTL never deregisters.
-   (The example registrar, `examples/nats/register.sh`, does exactly this.)
+   key while it answers; once the service fails it deregisters (and stops
+   refreshing). The **`quik-register`** sidecar agent (`quik-register/`) is the
+   reference implementation: a TOML-configured health check (http/https/tcp,
+   timeout, healthy/unhealthy thresholds, startup grace) that registers while
+   healthy, deregisters on `unhealthy_threshold` consecutive failures, and
+   deletes its key on `SIGTERM`. (`examples/nats/register.sh` is a minimal
+   shell-only alternative.)
 3. **quik active health (the data-path backstop).** Independently of the
    registry, quik probes each member from its *own* vantage point
    (`[upstreams.active_health]`). This catches failure modes the registrant
