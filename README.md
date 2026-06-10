@@ -123,7 +123,7 @@ make test           # full test suite
 make ci             # fmt-check + clippy + tests, as CI runs them
 ```
 
-Requires Rust 1.85+ (edition 2024). No system dependencies beyond a C linker.
+Requires Rust 1.88+ (edition 2024). No system dependencies beyond a C linker.
 
 ### Optional features
 
