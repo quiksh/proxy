@@ -1,6 +1,6 @@
 //! Admin API endpoint handlers.
 //!
-//! Routing is a small hand-rolled match against URI path components — only
+//! Routing is a small hand-rolled match against URI path components - only
 //! seven endpoints, no router crate needed. Member IDs in the path are
 //! URL-decoded before matching against `member.address`.
 
@@ -96,7 +96,7 @@ async fn list_pools(state: &RequestState<'_>) -> Response<AdminBody> {
     let snap = state.upstreams.snapshot();
     let mut pools: Vec<_> = snap.values().map(pool_to_detail).collect();
     // Stable order: sort by name. Operators reading the response repeatedly
-    // see deterministic output — same reason `stable_metrics()` exists.
+    // see deterministic output - same reason `stable_metrics()` exists.
     pools.sort_by(|a, b| a.name.cmp(&b.name));
     ok_json(&PoolListResponse { pools })
 }
@@ -126,7 +126,7 @@ async fn get_member(state: &RequestState<'_>, pool: &str, member_id: &str) -> Re
 // ── Snapshot ────────────────────────────────────────────────────────────────
 
 /// Render the live upstream pool state as TOML. Scoped to `[[upstreams]]`
-/// blocks because nothing else can drift at runtime — pools, routes, auth,
+/// blocks because nothing else can drift at runtime - pools, routes, auth,
 /// and listener config are static after boot. Each member carries an inline
 /// comment marking its provenance (`source: config` / `source: runtime`) so
 /// an operator can promote runtime adds back into the config file.
@@ -139,7 +139,7 @@ async fn config_snapshot(state: &RequestState<'_>) -> Response<AdminBody> {
     out.push_str(
         "# Live upstream snapshot.\n\
          #\n\
-         # Pools, routes, auth blocks, and listeners are static at runtime —\n\
+         # Pools, routes, auth blocks, and listeners are static at runtime -\n\
          # consult your original config file for those sections. The blocks\n\
          # below reflect live state including any runtime-added members.\n\
          #\n\
@@ -214,7 +214,7 @@ async fn add_member(
         return error_response(StatusCode::NOT_FOUND, "pool not found");
     };
 
-    // Read body with a generous cap — operator JSON, not user data.
+    // Read body with a generous cap - operator JSON, not user data.
     let body = match req.into_body().collect().await {
         Ok(b) => b.to_bytes(),
         Err(_) => {
@@ -251,7 +251,7 @@ async fn add_member(
     let address = parsed.address.clone();
 
     // Hold the write lock for the swap. Conflict detection uses the loaded
-    // snapshot under the lock — two concurrent ADDs of the same address see
+    // snapshot under the lock - two concurrent ADDs of the same address see
     // the same state.
     let _w = entry.write_lock.lock().await;
     let current = entry.members.load_full();
@@ -361,7 +361,7 @@ async fn delete_member(
 
     let now_ms = unix_now_ms();
     if let Err(state_now) = member.lifecycle.begin_drain(now_ms) {
-        // Already drained — no further action possible.
+        // Already drained - no further action possible.
         if state_now == crate::upstream::state::LifecycleState::Drained {
             audit(
                 action, &pool_name, &member_id, principal, state.peer, "gone", started,
@@ -369,7 +369,7 @@ async fn delete_member(
             return error_response(StatusCode::GONE, "member already drained");
         }
         // Already draining is idempotent (begin_drain returns Ok in that case)
-        // so reaching here means the state is somehow unexpected — error out.
+        // so reaching here means the state is somehow unexpected - error out.
     }
 
     metrics::counter!(
@@ -383,7 +383,7 @@ async fn delete_member(
         action, &pool_name, &member_id, principal, state.peer, "ok", started,
     );
 
-    // Spawn the drain task — non-blocking on the response.
+    // Spawn the drain task - non-blocking on the response.
     let drain_timeout = Duration::from_millis(entry.drain_cfg.timeout_ms);
     let entry_clone = entry.clone();
     let member_clone = member.clone();
@@ -463,7 +463,7 @@ async fn undrain_member(
                 "gone",
                 started,
             );
-            error_response(StatusCode::GONE, "member has already drained — re-add it")
+            error_response(StatusCode::GONE, "member has already drained - re-add it")
         }
         Err(state_now) => {
             audit(

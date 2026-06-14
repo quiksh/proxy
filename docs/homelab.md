@@ -1,7 +1,7 @@
 # Homelab reverse proxy
 
-A homelab usually has a handful of services running on different boxes —
-Proxmox at one IP, Plex at another, TrueNAS somewhere else — each on its own
+A homelab usually has a handful of services running on different boxes -
+Proxmox at one IP, Plex at another, TrueNAS somewhere else - each on its own
 port and most of them serving a self-signed certificate that browsers
 complain about. quik can sit in front of all of them, handle TLS once with a
 cert that *you* trust, and route by hostname.
@@ -18,7 +18,7 @@ One cert, valid for all three hostnames. WebSocket consoles (Proxmox noVNC,
 xterm.js) Just Work. Backend self-signed certs are accepted with
 `skip_verify`.
 
-## Step 1 — DNS
+## Step 1 - DNS
 
 The hostnames you put in the routes (`proxmox.internal`, `plex.internal`,
 etc.) have to resolve to the host running quik. Three common options:
@@ -32,10 +32,10 @@ etc.) have to resolve to the host running quik. Three common options:
 - **Your router's DNS**: most home routers let you set per-hostname A
   records.
 
-`.internal` is the recommendation — it's reserved by ICANN for private use,
+`.internal` is the recommendation - it's reserved by ICANN for private use,
 so it'll never collide with a real TLD.
 
-## Step 2 — Edit the sample config
+## Step 2 - Edit the sample config
 
 Copy `config/homelab.toml` and replace the backend IPs with your own:
 
@@ -78,7 +78,7 @@ The shape stays the same for any homelab service: add an `[[upstreams]]`
 block with its IP and scheme, then a `[[routes]]` block matching the
 hostname.
 
-## Step 3 — Run it
+## Step 3 - Run it
 
 The bundled runner script generates a self-signed cert with SANs for each
 hostname and starts the proxy:
@@ -101,19 +101,19 @@ SAN_HOSTS=proxmox.internal,plex.internal,truenas.internal \
 ./target/release/quik --config config/homelab.toml
 ```
 
-## Step 4 — A real cert (optional, but nice)
+## Step 4 - A real cert (optional, but nice)
 
 A browser-trusted certificate makes the experience cleaner. Two approaches
 that work well in a homelab:
 
-- **mkcert** — set up a local CA, then issue a cert quik trusts. Install the
+- **mkcert** - set up a local CA, then issue a cert quik trusts. Install the
   mkcert root on each client device and the green padlock comes back.
   ```bash
   mkcert -install
   mkcert -cert-file tls/cert.pem -key-file tls/key.pem \
     proxmox.internal plex.internal truenas.internal
   ```
-- **Let's Encrypt with DNS-01** — if your `*.internal` names live in a real
+- **Let's Encrypt with DNS-01** - if your `*.internal` names live in a real
   domain you control (e.g. `*.lab.example.com`), [certbot] or [lego] can
   issue a wildcard cert without exposing anything to the public internet.
   Drop the resulting fullchain/key into `tls/` and quik picks them up on
@@ -126,7 +126,7 @@ Either way: replace `tls/cert.pem` and `tls/key.pem`, restart, done.
 **Absolute-URL redirects.** Some backend admin UIs (Proxmox and TrueNAS, in
 particular) emit `Location` headers with the backend's IP rather than the
 proxy hostname. quik does not rewrite response bodies or Location headers.
-The fix is on the backend side — every one of these services has a setting
+The fix is on the backend side - every one of these services has a setting
 for "external URL" or "trusted proxy" that tells it to issue relative
 redirects.
 
@@ -135,7 +135,7 @@ on first request, then switches over to its own discovery URL on
 `*.plex.direct`. That's Plex's own behaviour, not a quik issue, and there's
 nothing the proxy can do about it without rewriting JavaScript.
 
-**TLS upgrade for WebSocket consoles.** No config needed — quik forwards
+**TLS upgrade for WebSocket consoles.** No config needed - quik forwards
 `Upgrade: websocket` transparently. The Proxmox noVNC console and the
 xterm.js terminal both work end-to-end.
 
@@ -146,7 +146,7 @@ threads or buffer sizes.
 
 ## What's next
 
-- More backends? Same shape — copy an upstream + route pair and adjust IPs.
+- More backends? Same shape - copy an upstream + route pair and adjust IPs.
 - A second proxy host for redundancy? See
   [HA reverse proxy](ha-reverse-proxy.md).
 - Outbound filtering for the same network? See

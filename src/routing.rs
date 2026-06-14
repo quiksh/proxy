@@ -3,7 +3,7 @@
 //! Precedence rules (applied via sort, then first-hit):
 //! 1. Exact paths beat any prefix.
 //! 2. Among prefixes, longest-prefix-first.
-//! 3. Path matching is segment-aware — `/api` matches `/api` and `/api/x`,
+//! 3. Path matching is segment-aware - `/api` matches `/api` and `/api/x`,
 //!    but NOT `/apifoo`.
 //!
 //! Host matching strips `:port` and is case-insensitive. Wildcard hosts use
@@ -46,7 +46,7 @@ impl HostMatcher {
         match self {
             HostMatcher::Exact(s) => host.eq_ignore_ascii_case(s),
             HostMatcher::WildcardSubdomain(suffix) => {
-                // suffix already starts with '.' — store form: ".example.com"
+                // suffix already starts with '.' - store form: ".example.com"
                 host.len() > suffix.len()
                     && host[host.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
             }
@@ -60,7 +60,7 @@ impl HostMatcher {
             }
             Ok(HostMatcher::WildcardSubdomain(format!(".{rest}")))
         } else if raw.contains('*') {
-            bail!("unsupported wildcard in host '{raw}' — only leading '*.' is allowed");
+            bail!("unsupported wildcard in host '{raw}' - only leading '*.' is allowed");
         } else if raw.is_empty() {
             bail!("empty host string");
         } else {

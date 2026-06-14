@@ -70,7 +70,7 @@ futures = { version = "0.3", optional = true }
 
 [features]
 # First-class but optional NATS-backed service registration. Without it (the
-# default), membership comes from config + the admin API only — zero NATS dep.
+# default), membership comes from config + the admin API only - zero NATS dep.
 nats = ["dep:async-nats", "dep:futures"]
 
 [dev-dependencies]

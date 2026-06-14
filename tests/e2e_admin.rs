@@ -1,4 +1,4 @@
-//! Admin API e2e — live registration + auth.
+//! Admin API e2e - live registration + auth.
 //!
 //! Drives the admin listener over plain HTTP (the default; mTLS variant is
 //! covered at the unit level in src/admin/auth.rs and via TLS-handshake
@@ -255,7 +255,7 @@ async fn drain_member_without_removal_stops_new_traffic() {
     let id_b = backend_b.addr.to_string();
     let encoded = urlencode(&id_b);
 
-    // POST /drain — member transitions to draining but isn't removed.
+    // POST /drain - member transitions to draining but isn't removed.
     let client = reqwest::Client::new();
     let resp = client
         .post(admin_url(
@@ -267,7 +267,7 @@ async fn drain_member_without_removal_stops_new_traffic() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
 
-    // Hammer the proxy — all traffic should now go to backend_a.
+    // Hammer the proxy - all traffic should now go to backend_a.
     let proxy_client = https_client();
     for _ in 0..20 {
         let _ = proxy_client
@@ -294,7 +294,7 @@ async fn undrain_restores_routing() {
     let backend_a = Backend::spawn("a").await;
     // b responds slowly so we can hold one request in-flight against it. The
     // drain task's first poll is immediate, so a member with zero in-flight is
-    // marked `drained` almost at once — undrain would then race and lose. An
+    // marked `drained` almost at once - undrain would then race and lose. An
     // in-flight request keeps b `draining` deterministically until we undrain.
     let backend_b = Backend::spawn_with_delay("b", Duration::from_millis(500)).await;
     let proxy = spawn_proxy(ProxySpec {
@@ -326,7 +326,7 @@ async fn undrain_restores_routing() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let client = reqwest::Client::new();
-    // Drain b — it stays draining because the pinned request is in-flight.
+    // Drain b - it stays draining because the pinned request is in-flight.
     let drain_resp = client
         .post(admin_url(
             proxy.admin_addr,
@@ -336,7 +336,7 @@ async fn undrain_restores_routing() {
         .await
         .unwrap();
     assert_eq!(drain_resp.status(), StatusCode::ACCEPTED);
-    // Undrain b — succeeds because it's still draining, not drained.
+    // Undrain b - succeeds because it's still draining, not drained.
     let resp = client
         .post(admin_url(
             proxy.admin_addr,
@@ -539,7 +539,7 @@ async fn read_endpoints_remain_open_when_only_write_is_authed() {
     .await;
 
     let client = reqwest::Client::new();
-    // GET without auth — should succeed because read is None.
+    // GET without auth - should succeed because read is None.
     let resp = client
         .get(admin_url(proxy.admin_addr, "/admin/pools"))
         .send()
@@ -645,7 +645,7 @@ async fn config_snapshot_renders_upstream_pools_with_provenance() {
     assert!(body.contains("name = \"pool-a\""));
     assert!(body.contains(&backend_a.addr.to_string()));
     assert!(body.contains(&backend_b.addr.to_string()));
-    // Provenance comments — backend_a came from config, backend_b from runtime.
+    // Provenance comments - backend_a came from config, backend_b from runtime.
     let line_a = body
         .lines()
         .find(|l| l.contains(&backend_a.addr.to_string()))
@@ -661,7 +661,7 @@ async fn config_snapshot_renders_upstream_pools_with_provenance() {
 // ── helpers ─────────────────────────────────────────────────────────────────
 
 /// Tiny percent-encoder for socket-addr-style IDs. We only need to encode `:`,
-/// `[`, `]` — the characters that appear in IPv4 host:port and IPv6 literals.
+/// `[`, `]` - the characters that appear in IPv4 host:port and IPv6 literals.
 fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
     for b in s.bytes() {

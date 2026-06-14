@@ -1,4 +1,4 @@
-# HA quik config. Identical for every quik instance — they all watch the same
+# HA quik config. Identical for every quik instance - they all watch the same
 # replicated bucket and converge independently (NATS fans out one put to all).
 # `url` lists every cluster node; async-nats fails over between them.
 

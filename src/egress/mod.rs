@@ -4,7 +4,7 @@
 //! `[egress]` is set in the config, a dedicated listener accepts HTTP
 //! CONNECT requests, applies a first-match-wins host/CIDR allow-deny
 //! policy, and (when allowed) tunnels the byte stream to the requested
-//! destination — peeking at the first chunk to record the TLS SNI.
+//! destination - peeking at the first chunk to record the TLS SNI.
 //!
 //! Only CONNECT is supported. Absolute-URI plain-HTTP forwarding (tier 3
 //! in the original sketch) is intentionally not implemented; modern egress
@@ -311,7 +311,7 @@ where
                         target: "quik::egress",
                         target = %target_label,
                         sni = %sni_name,
-                        "SNI does not match CONNECT target — aborting (sni_enforce=true)"
+                        "SNI does not match CONNECT target - aborting (sni_enforce=true)"
                     );
                     let _ = upstream.shutdown().await;
                     return (peek_read as u64, 0);
@@ -320,7 +320,7 @@ where
                     target: "quik::egress",
                     target = %target_label,
                     sni = %sni_name,
-                    "SNI does not match CONNECT target — allowing (sni_enforce=false)"
+                    "SNI does not match CONNECT target - allowing (sni_enforce=false)"
                 );
             }
         }
@@ -409,7 +409,7 @@ async fn authenticate(
             if user.is_empty() {
                 return Err(challenge_407(auth));
             }
-            // No password validation by design — the realm name documents
+            // No password validation by design - the realm name documents
             // the trust posture, and the username is logged for audit.
             Ok(user.to_string())
         }

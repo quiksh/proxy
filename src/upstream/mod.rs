@@ -11,7 +11,7 @@
 //!   and `inflight_gauge` are constructed once and stored as cheap-to-clone
 //!   `Arc` handles. The forward hot path doesn't allocate label strings for
 //!   each emission. This requires the prometheus recorder to be installed
-//!   BEFORE `Pool::from_config` — see `tests/common/install_metrics_recorder`.
+//!   BEFORE `Pool::from_config` - see `tests/common/install_metrics_recorder`.
 //! - **[`CountingBody`] wraps every direction.** Byte counters are incremented
 //!   per data frame so streaming uploads / downloads are attributed even
 //!   without `Content-Length`.
@@ -190,7 +190,7 @@ pub enum MemberSource {
     /// operator copies the snapshot back into the config file.
     Runtime,
     /// Reconciled from the NATS registration bucket by the watcher. Owned by
-    /// the watcher — only it may remove these; config/runtime members are never
+    /// the watcher - only it may remove these; config/runtime members are never
     /// touched by reconciliation.
     Nats,
 }
@@ -218,7 +218,7 @@ pub struct Upstream {
     pub source: MemberSource,
     pub health: Arc<UpstreamHealth>,
     /// Active probe state. `disabled()` for members in pools where active
-    /// checks aren't configured — `is_eligible()` is then unconditionally
+    /// checks aren't configured - `is_eligible()` is then unconditionally
     /// true and existing behaviour is preserved.
     pub active_health: Arc<state::ActiveHealth>,
     /// Operator-controlled lifecycle. `active` by default; transitions
@@ -289,7 +289,7 @@ impl UpstreamHealth {
     }
 
     /// Record a successful request. Resets the consecutive-failure counter
-    /// and clears any active ejection window — a successful probe means
+    /// and clears any active ejection window - a successful probe means
     /// the member has recovered. Returns true if this call transitioned
     /// the member out of an ejected state.
     pub fn record_success(&self) -> bool {
@@ -326,7 +326,7 @@ impl UpstreamHealth {
 
 /// Decrement-only RAII guard for in-flight tracking. The increment happens
 /// inside `Balancer::pick` so subsequent concurrent picks see the new
-/// inflight value immediately — otherwise a burst of concurrent requests
+/// inflight value immediately - otherwise a burst of concurrent requests
 /// could all see inflight=0 and stampede the same member.
 pub struct InflightGuard {
     health: Arc<UpstreamHealth>,
@@ -366,11 +366,11 @@ pub struct UpstreamPoolEntry {
     pub client: ProxyClient,
     /// What HTTP version to use on the upstream connection. Drives both the
     /// connector's ALPN advertisement and the version we stamp onto the
-    /// outbound `Request`. They must match — ALPN-negotiated h1 with a
+    /// outbound `Request`. They must match - ALPN-negotiated h1 with a
     /// request marked h2 produces hyper-util's `UserUnsupportedVersion`.
     pub http_version: UpstreamHttpVersion,
     /// Serialises admin writers (add / remove / drain). The hot path never
-    /// takes this lock — it only loads the `members` snapshot. Mutexed write
+    /// takes this lock - it only loads the `members` snapshot. Mutexed write
     /// path lets us do load → clone → mutate → store without two writers
     /// racing into a torn slice.
     pub write_lock: tokio::sync::Mutex<()>,
@@ -383,7 +383,7 @@ pub struct UpstreamPoolEntry {
     /// is removed or drained via the admin API.
     pub drain_cfg: DrainConfig,
     /// Per-pool passive health config. Kept on the entry so the admin API
-    /// can build new `Upstream` instances when adding members at runtime —
+    /// can build new `Upstream` instances when adding members at runtime -
     /// otherwise we'd lose the operator's tuning on dynamic adds.
     pub health_cfg: UpstreamHealthConfig,
     /// Balancer name in human form, used for the admin API responses
@@ -444,7 +444,7 @@ impl UpstreamPoolEntry {
 
 impl UpstreamPoolEntry {
     /// Snapshot of the current member list. Cheap (single Arc clone). Hold
-    /// the returned Arc for as long as you need the borrowed members — once
+    /// the returned Arc for as long as you need the borrowed members - once
     /// you drop it, the list may be replaced by a writer.
     pub fn members_snapshot(&self) -> Arc<Vec<Arc<Upstream>>> {
         self.members.load_full()
@@ -554,12 +554,12 @@ fn build_client(u: &UpstreamPoolConfig) -> Result<ProxyClient> {
     // install_default returns Err on second call (idempotent across the process).
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    // ALPN is set by hyper-rustls via .enable_http1() / .enable_http2() below —
+    // ALPN is set by hyper-rustls via .enable_http1() / .enable_http2() below -
     // don't pre-populate alpn_protocols here (hyper-rustls panics if we do).
     let tls_config = if u.tls.skip_verify {
         tracing::warn!(
             pool = %u.name,
-            "skip_verify is enabled — upstream TLS certificates will not be checked"
+            "skip_verify is enabled - upstream TLS certificates will not be checked"
         );
         ClientConfig::builder()
             .dangerous()
@@ -596,7 +596,7 @@ fn build_client(u: &UpstreamPoolConfig) -> Result<ProxyClient> {
 }
 
 /// Dangerous: accepts any server certificate. Only used when a pool's
-/// `tls.skip_verify = true` — for internal CAs, self-signed certs in test
+/// `tls.skip_verify = true` - for internal CAs, self-signed certs in test
 /// environments, or trusted private networks.
 #[derive(Debug)]
 struct NoVerifier;

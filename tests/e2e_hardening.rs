@@ -41,7 +41,7 @@ async fn websocket_idle_tunnel_is_culled_after_timeout() {
 
     assert!(
         next.is_ok(),
-        "ws read did not return within 5s — idle cull did not fire"
+        "ws read did not return within 5s - idle cull did not fire"
     );
     // Idle timeout is 500ms; allow generous wall-clock slack for CI.
     assert!(

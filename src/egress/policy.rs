@@ -2,7 +2,7 @@
 //!
 //! Semantics: first-match-wins over a list of rules. Each rule has an action
 //! (allow/deny) plus a set of host patterns and CIDR ranges. A rule matches
-//! if the request hits ANY of its hosts OR ANY of its CIDRs — that way a
+//! if the request hits ANY of its hosts OR ANY of its CIDRs - that way a
 //! single rule can express "this kind of destination", whether it's named
 //! by domain or by address. If no rule matches, the policy's `default_action`
 //! applies.
@@ -39,7 +39,7 @@ pub enum HostMatcher {
     Exact(String),
     /// Wildcard subdomain: stored form ".example.com", matches anything
     /// ending in that suffix (so `api.example.com` matches but the bare
-    /// `example.com` does not — same semantics as in `routing.rs`).
+    /// `example.com` does not - same semantics as in `routing.rs`).
     WildcardSubdomain(String),
 }
 
@@ -92,13 +92,13 @@ pub struct EgressPolicy {
     default: Decision,
     sni_enforce: bool,
     /// DNS lookups for hostname targets time out at this bound. Resolution
-    /// failure is treated as "no IPs to check" — the policy still applies
+    /// failure is treated as "no IPs to check" - the policy still applies
     /// host rules + default action.
     pub dns_timeout: Duration,
     auth: Option<CompiledEgressAuth>,
 }
 
-/// Compiled form of `EgressAuthConfig` — resolved against the global
+/// Compiled form of `EgressAuthConfig` - resolved against the global
 /// `AuthRegistry` at startup so the hot path doesn't do a lookup per
 /// request.
 pub enum CompiledEgressAuth {
@@ -134,7 +134,7 @@ impl EgressPolicy {
     pub fn from_config(cfg: &EgressConfig) -> Result<Self> {
         if cfg.auth.is_some() {
             bail!(
-                "egress config has [egress.auth] — use from_config_with_auth(cfg, &auth_registry)"
+                "egress config has [egress.auth] - use from_config_with_auth(cfg, &auth_registry)"
             );
         }
         Self::build(cfg, None)
@@ -222,7 +222,7 @@ impl EgressPolicy {
 
 fn compile_rule(r: &EgressRuleConfig) -> Result<CompiledRule> {
     if r.hosts.is_empty() && r.cidrs.is_empty() {
-        bail!("rule has no hosts and no cidrs — at least one must be set");
+        bail!("rule has no hosts and no cidrs - at least one must be set");
     }
     let mut hosts = Vec::with_capacity(r.hosts.len());
     for h in &r.hosts {
@@ -324,7 +324,7 @@ mod tests {
             EgressAction::Allow,
             vec![rule(EgressAction::Deny, &[], &["169.254.0.0/16"])],
         );
-        // Hostname resolves to a link-local IP — should be blocked even
+        // Hostname resolves to a link-local IP - should be blocked even
         // though the host string didn't match anything.
         assert_eq!(
             p.evaluate("metadata.example", &[ip("169.254.169.254")]),
@@ -341,7 +341,7 @@ mod tests {
                 rule(EgressAction::Deny, &["evil.example.com"], &[]),
             ],
         );
-        // Allow rule comes first and matches — never get to the deny.
+        // Allow rule comes first and matches - never get to the deny.
         assert_eq!(p.evaluate("evil.example.com", &[]), Decision::Allow);
     }
 

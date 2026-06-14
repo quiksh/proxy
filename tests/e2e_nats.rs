@@ -8,7 +8,7 @@
 //!   cargo test --features nats --test e2e_nats
 //!
 //! Self-skips (does not fail) when no NATS is reachable, so a default
-//! `cargo test` — where this whole file is compiled out — and a feature build
+//! `cargo test` - where this whole file is compiled out - and a feature build
 //! without a server both stay green. Point at a non-default server with
 //! QUIK_TEST_NATS_URL.
 #![cfg(feature = "nats")]
@@ -201,7 +201,7 @@ async fn disallowed_address_is_rejected() {
     let store = fresh_bucket(&client, bucket).await;
     let backend = Backend::spawn("a").await; // loopback 127.x
 
-    // allow-list is 10.0.0.0/8 — the loopback backend is NOT in it (H1).
+    // allow-list is 10.0.0.0/8 - the loopback backend is NOT in it (H1).
     store
         .put("reg.t.svc.i1", reg_value(backend.addr).into())
         .await

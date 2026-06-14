@@ -1,4 +1,4 @@
-# quik auth demo — multiple [[auth]] blocks, different routes use different
+# quik auth demo - multiple [[auth]] blocks, different routes use different
 # blocks. Same JWKS in both cases (so the Python helper can mint tokens for
 # either), but with diverging issuer/audience/required-claims rules.
 #
@@ -92,7 +92,7 @@ auth         = "services"
 timeout_ms   = 5000
 upstream     = "echo"
 
-# Catchall — also requires a user token. Demos the deny-by-default posture.
+# Catchall - also requires a user token. Demos the deny-by-default posture.
 [[routes]]
 path_prefix = "/"
 auth        = "users"

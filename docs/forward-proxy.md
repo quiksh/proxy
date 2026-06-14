@@ -2,7 +2,7 @@
 
 quik can run a second listener that accepts HTTP `CONNECT` requests and
 tunnels them to allowed destinations. It's the same binary as the reverse
-proxy — just opt into the `[egress]` block in your config and it spins up
+proxy - just opt into the `[egress]` block in your config and it spins up
 another listener alongside the main one.
 
 The use case: you want outbound HTTPS from a network to go through a
@@ -13,7 +13,7 @@ chokepoint where you can:
 - catch obvious bypasses (DNS-rebinding, SNI spoofing).
 
 It is **not** an HTTPS interception proxy. quik never sees the bytes inside
-the tunnel — TLS stays end-to-end between the client and the destination.
+the tunnel - TLS stays end-to-end between the client and the destination.
 What it does see is the CONNECT target (host:port) and, optionally, the
 SNI extension in the first TLS frame.
 
@@ -87,7 +87,7 @@ Anything not matched falls to `default_action = deny`.
 ## SNI verification
 
 When a client tunnels HTTPS through CONNECT, the first thing they send
-inside the tunnel is the TLS ClientHello — which carries the destination
+inside the tunnel is the TLS ClientHello - which carries the destination
 hostname in the SNI extension. quik can peek at that and compare it to the
 CONNECT target:
 
@@ -144,7 +144,7 @@ block            = "main"
 originator_claim = "sub"     # what to log as the originator (default: sub)
 ```
 
-JWT validation runs **before** the rule list — a missing or invalid token
+JWT validation runs **before** the rule list - a missing or invalid token
 returns `407 Proxy Authentication Required` regardless of destination.
 
 Without an `[egress.auth]` block, no authentication is required; the access
@@ -153,7 +153,7 @@ log records `originator = "-"`.
 ## What the destination sees
 
 The destination server sees the proxy's IP address, not the client's.
-That's a property of CONNECT, not a quik decision — there's no header
+That's a property of CONNECT, not a quik decision - there's no header
 quik can add inside the tunnel because the tunnel is opaque TLS.
 
 If you need to attribute traffic at the destination, you need to do it at
@@ -203,7 +203,7 @@ hosts  = ["*.github.com"]
 # ...the usual [[upstreams]] / [[routes]] for the reverse-proxy side...
 ```
 
-If `[egress]` is absent, the egress listener simply isn't started — there's
+If `[egress]` is absent, the egress listener simply isn't started - there's
 no overhead for the reverse-proxy-only deployment.
 
 ## Things quik doesn't do
@@ -218,6 +218,6 @@ no overhead for the reverse-proxy-only deployment.
 
 ## What to read next
 
-- [Config reference](config-reference.md) — every `[egress.*]` field.
-- [HA reverse proxy](ha-reverse-proxy.md) — the other half of the same
+- [Config reference](config-reference.md) - every `[egress.*]` field.
+- [HA reverse proxy](ha-reverse-proxy.md) - the other half of the same
   binary.

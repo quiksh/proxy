@@ -1,6 +1,6 @@
 //! Shared test harness: cert generation, test backend, proxy spawning.
 //!
-//! Each integration-test binary uses a subset of this module — items it doesn't
+//! Each integration-test binary uses a subset of this module - items it doesn't
 //! reference are otherwise flagged as dead code. Suppress at the module level.
 #![allow(dead_code)]
 
@@ -86,7 +86,7 @@ impl Backend {
     }
 
     /// Spawn a backend whose response status can be mutated at runtime. Tests
-    /// use this to drive the passive-health state machine — flip to 503,
+    /// use this to drive the passive-health state machine - flip to 503,
     /// observe ejection, flip back to 200, observe recovery.
     pub async fn spawn_with_dynamic_status(name: impl Into<String>) -> (Self, Arc<AtomicU16>) {
         let name = name.into();
@@ -537,7 +537,7 @@ pub struct Backends {
     pub http_version: UpstreamHttpVersion,
     /// Active health (default: disabled).
     pub active_health: quik::config::ActiveHealthConfig,
-    /// Drain timeout (default: 60s — but tests usually want shorter).
+    /// Drain timeout (default: 60s - but tests usually want shorter).
     pub drain: quik::config::DrainConfig,
     /// NATS registration binding (default: none). Set via [`Backends::with_nats`].
     pub nats: Option<quik::config::UpstreamNatsConfig>,
@@ -578,7 +578,7 @@ impl Backends {
         self
     }
 
-    /// Override drain timeout. Tests usually use 1–3 seconds.
+    /// Override drain timeout. Tests usually use 1-3 seconds.
     pub fn with_drain_timeout_ms(mut self, ms: u64) -> Self {
         self.drain = quik::config::DrainConfig { timeout_ms: ms };
         self
@@ -698,7 +698,7 @@ pub async fn spawn_proxy_with_admin_auth(
     .await
 }
 
-/// Spawn a proxy with a top-level `[nats]` config — used by the e2e_nats tests.
+/// Spawn a proxy with a top-level `[nats]` config - used by the e2e_nats tests.
 /// The watcher is only spawned in a `--features nats` build.
 pub async fn spawn_proxy_with_nats(spec: ProxySpec, nats: quik::config::NatsConfig) -> ProxyHandle {
     spawn_proxy_full(
@@ -784,7 +784,7 @@ async fn spawn_proxy_full(
         nats,
     };
 
-    // IMPORTANT: install the prometheus recorder BEFORE building the pool —
+    // IMPORTANT: install the prometheus recorder BEFORE building the pool -
     // each Upstream pre-builds metrics::Counter / Gauge handles in its
     // constructor, and those handles bind to whatever recorder is global at
     // construction time. If we built the pool first, the handles would
@@ -835,7 +835,7 @@ async fn spawn_proxy_full(
         ));
     }
 
-    // Admin auth is None/None for tests by default — e2e tests for auth
+    // Admin auth is None/None for tests by default - e2e tests for auth
     // build their own ProxyHandle with explicit config.
     let admin_auth = quik::admin::compile_auth(&cfg.admin).expect("admin auth compile");
     let admin_state = quik::admin::AdminState {
@@ -944,7 +944,7 @@ async fn handle_sse_request(
 }
 
 /// hyper-util client that accepts self-signed certs and speaks h2 (over TLS,
-/// negotiated via ALPN). Used by tests that need trailer access — reqwest's
+/// negotiated via ALPN). Used by tests that need trailer access - reqwest's
 /// public API doesn't expose response trailers.
 pub fn hyper_h2_client() -> Client<hyper_rustls::HttpsConnector<HttpConnector>, Empty<Bytes>> {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();

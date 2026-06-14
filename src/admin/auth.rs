@@ -1,4 +1,4 @@
-//! Admin API authentication — bearer token and mTLS.
+//! Admin API authentication - bearer token and mTLS.
 //!
 //! Configured per endpoint group (read vs write). Tokens are resolved from
 //! env vars at startup, not at request time, so a misconfigured env var
@@ -19,12 +19,12 @@ use crate::config::{AdminAuthConfig, AdminAuthGroups};
 /// from env at startup.
 #[derive(Clone)]
 pub enum CompiledAuth {
-    /// No auth — endpoint is open.
+    /// No auth - endpoint is open.
     None,
     /// Bearer token comparison. The token bytes are kept as `Arc<[u8]>` so
     /// the handler can do constant-time comparison without cloning.
     BearerToken { token: Arc<[u8]> },
-    /// mTLS — the TLS handshake guarantees the client cert validated against
+    /// mTLS - the TLS handshake guarantees the client cert validated against
     /// the configured CA. The handler reads the fingerprint from the
     /// AuthContext (filled in by the TLS-accepting code) for audit logging.
     Mtls,
@@ -47,13 +47,13 @@ pub struct CompiledAuthGroups {
 }
 
 impl CompiledAuthGroups {
-    /// True iff any group uses mTLS — implies the admin listener must run TLS.
+    /// True iff any group uses mTLS - implies the admin listener must run TLS.
     pub fn requires_mtls(&self) -> bool {
         matches!(self.read, CompiledAuth::Mtls) || matches!(self.write, CompiledAuth::Mtls)
     }
 
     /// True iff any group uses TLS at all (mTLS or via [admin.tls] for
-    /// non-mtls modes — but bearer-over-TLS isn't explicitly modelled; the
+    /// non-mtls modes - but bearer-over-TLS isn't explicitly modelled; the
     /// listener uses TLS only when mtls is in play).
     pub fn requires_tls(&self) -> bool {
         self.requires_mtls()
@@ -79,7 +79,7 @@ fn compile_one(cfg: &AdminAuthConfig, label: &str) -> Result<CompiledAuth> {
             })?;
             if token.is_empty() {
                 return Err(anyhow!(
-                    "{label}: env var '{token_env}' is set but empty — \
+                    "{label}: env var '{token_env}' is set but empty - \
                      bearer token must be non-empty"
                 ));
             }
@@ -91,7 +91,7 @@ fn compile_one(cfg: &AdminAuthConfig, label: &str) -> Result<CompiledAuth> {
     }
 }
 
-/// Group this request belongs to — determined by method.
+/// Group this request belongs to - determined by method.
 #[derive(Debug, Clone, Copy)]
 pub enum AuthGroup {
     Read,
@@ -182,7 +182,7 @@ fn cert_fingerprint_hex(der: &[u8]) -> String {
     out
 }
 
-/// Constant-time byte comparison. Length-stable to within a few cycles —
+/// Constant-time byte comparison. Length-stable to within a few cycles -
 /// good enough for an admin token that's not high-volume.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {

@@ -3,7 +3,7 @@
 
 This is a development / smoke-test helper. The private key it generates is
 written to scripts/test_keys/private.pem with mode 0600 and is intended to
-be regenerated freely — never reuse it in production.
+be regenerated freely - never reuse it in production.
 
 Subcommands:
   init                       Generate a fresh Ed25519 keypair under scripts/test_keys/.
@@ -55,7 +55,7 @@ DEFAULT_AUDIENCE = "api"
 def current_kid() -> str:
     if not KID_PATH.exists():
         sys.exit(
-            f"{KID_PATH} not found — generate one with:\n  {sys.argv[0]} init"
+            f"{KID_PATH} not found - generate one with:\n  {sys.argv[0]} init"
         )
     return KID_PATH.read_text().strip()
 
@@ -63,7 +63,7 @@ def current_kid() -> str:
 def load_private_pem() -> bytes:
     if not PRIVATE_KEY_PATH.exists():
         sys.exit(
-            f"{PRIVATE_KEY_PATH} not found — generate one with:\n"
+            f"{PRIVATE_KEY_PATH} not found - generate one with:\n"
             f"  {sys.argv[0]} init"
         )
     return PRIVATE_KEY_PATH.read_bytes()

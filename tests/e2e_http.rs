@@ -297,7 +297,7 @@ async fn path_exact_beats_prefix() {
         .expect("send");
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // Anything other than the exact path also gets 200 — but via the prefix route
+    // Anything other than the exact path also gets 200 - but via the prefix route
     let resp = client
         .get(url(proxy.addr, "/api/x"))
         .send()
@@ -305,7 +305,7 @@ async fn path_exact_beats_prefix() {
         .expect("send");
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // /api/healthz/extra is NOT the exact match — falls through to prefix
+    // /api/healthz/extra is NOT the exact match - falls through to prefix
     let resp = client
         .get(url(proxy.addr, "/api/healthz/extra"))
         .send()
@@ -573,7 +573,7 @@ async fn passive_health_recovers_after_backoff_window() {
     let client = https_client_http1_only();
 
     // 3 failures → ejected. Backend is the only member, so the 4th request
-    // can't be routed anywhere — proxy returns 503 itself.
+    // can't be routed anywhere - proxy returns 503 itself.
     for _ in 0..3 {
         let r = client
             .get(url(proxy.addr, "/x"))
@@ -644,7 +644,7 @@ async fn least_connections_routes_around_a_slow_member() {
     let url_str = url(proxy.addr, "/x");
 
     // Stream requests in with a small gap rather than firing all at once.
-    // Bursts of N pick all at once and decide based on a momentary snapshot —
+    // Bursts of N pick all at once and decide based on a momentary snapshot -
     // LC's whole point is that it reacts to *completions* between picks, so
     // fast's inflight should drop back to 0 between launches while slow's
     // 120ms requests accumulate.
@@ -772,7 +772,7 @@ async fn inject_headers_reject_spoofed_value_403() {
 #[tokio::test]
 async fn inject_headers_reject_spoof_even_when_claim_missing() {
     // Mapped header is x-tenant-id but the JWT doesn't carry tenant_id and
-    // the mapping is optional — under silent-overwrite semantics this would
+    // the mapping is optional - under silent-overwrite semantics this would
     // pass through to the backend. With the loud-reject policy, the mere
     // presence of the reserved header on the inbound request is enough to
     // 403, regardless of whether we'd have injected anything.
@@ -1019,7 +1019,7 @@ async fn jwt_missing_token_returns_401() {
 async fn jwt_bad_signature_returns_401() {
     let (backend, _legit_signer, _auth, proxy) = auth_test_harness().await;
 
-    // Sign with a *different* keypair but advertise the matching kid — the
+    // Sign with a *different* keypair but advertise the matching kid - the
     // server will look up the (legit) key and the signature won't verify.
     let attacker = common::TestJwtSigner::with_kid("k1");
     let token = attacker.sign(valid_claims());
@@ -1076,7 +1076,7 @@ async fn jwt_wrong_audience_returns_403() {
 async fn jwt_expired_token_returns_403() {
     let (backend, signer, _auth, proxy) = auth_test_harness().await;
     let mut claims = valid_claims();
-    // 1 hour in the past — well outside any reasonable clock-skew leeway.
+    // 1 hour in the past - well outside any reasonable clock-skew leeway.
     claims["exp"] = serde_json::Value::Number((unix_now() - 3600).into());
     let token = signer.sign(claims);
 
@@ -1113,7 +1113,7 @@ async fn jwt_missing_required_claim_returns_403() {
 async fn jwt_kid_rotation_triggers_jwks_refresh() {
     // The JWKS endpoint starts with only an old key. A request signed by a
     // freshly-rotated key (different kid) misses the cache and triggers a
-    // refresh — which we simulate by mutating the JWKS body between the
+    // refresh - which we simulate by mutating the JWKS body between the
     // initial cache-fill and the second request.
     let old_signer = common::TestJwtSigner::with_kid("old");
     let new_signer = common::TestJwtSigner::with_kid("new");
@@ -1649,7 +1649,7 @@ async fn sse_events_arrive_separately_not_buffered() {
 
     let started = Instant::now();
     let mut body = resp.into_body();
-    // Only non-empty data frames count as "events" — h2 sometimes interleaves
+    // Only non-empty data frames count as "events" - h2 sometimes interleaves
     // empty data frames for flow-control / padding which aren't user-visible.
     let mut arrivals: Vec<(Duration, Bytes)> = Vec::new();
     while let Some(frame) = body.frame().await {
@@ -1674,11 +1674,11 @@ async fn sse_events_arrive_separately_not_buffered() {
     let last = arrivals.last().unwrap().0;
     assert!(
         first < Duration::from_millis(80),
-        "first event arrived too late ({first:?}) — proxy is buffering"
+        "first event arrived too late ({first:?}) - proxy is buffering"
     );
     assert!(
         last >= Duration::from_millis(150),
-        "last event arrived too quickly ({last:?}) — backend delays not observed end-to-end"
+        "last event arrived too quickly ({last:?}) - backend delays not observed end-to-end"
     );
     assert!(
         last - first >= Duration::from_millis(100),
@@ -1765,7 +1765,7 @@ async fn stream_body_limit_aborts_oversized_chunked_upload() {
     .await;
     let client = https_client_http1_only();
 
-    // Chunked body (no Content-Length) totalling 1.2KB — exceeds the 1024 limit.
+    // Chunked body (no Content-Length) totalling 1.2KB - exceeds the 1024 limit.
     // The Content-Length pre-check can't fire here because there isn't one;
     // the stream-aware wrap is what catches it.
     let chunks = stream::iter(vec![
@@ -1781,7 +1781,7 @@ async fn stream_body_limit_aborts_oversized_chunked_upload() {
         .await;
 
     // Either the proxy returned a 5xx (upstream error from broken body stream)
-    // or the connection was reset — both indicate the limit was enforced.
+    // or the connection was reset - both indicate the limit was enforced.
     match resp {
         Ok(r) => assert!(
             r.status().is_server_error() || r.status() == StatusCode::PAYLOAD_TOO_LARGE,
@@ -1817,7 +1817,7 @@ async fn body_too_large_returns_413() {
     .await;
     let client = https_client_http1_only();
 
-    // Body exceeds limit — Content-Length set by reqwest. Expect 413.
+    // Body exceeds limit - Content-Length set by reqwest. Expect 413.
     let payload = "x".repeat(2048);
     let resp = client
         .post(url(proxy.addr, "/upload"))
@@ -1828,7 +1828,7 @@ async fn body_too_large_returns_413() {
     assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(backend.calls().len(), 0, "request should not reach backend");
 
-    // Body under limit — should pass through.
+    // Body under limit - should pass through.
     let small = "x".repeat(512);
     let resp = client
         .post(url(proxy.addr, "/upload"))

@@ -15,7 +15,7 @@
 //!   404/auth-fail access log carries the correlation id even when we never
 //!   touch an upstream.
 //! - **Header byte counters are approximations.** We count the logical
-//!   (uncompressed) header bytes — useful for capacity / accounting — not
+//!   (uncompressed) header bytes - useful for capacity / accounting - not
 //!   the on-wire HPACK or TLS-record overhead.
 //! - **Error chains are unfolded.** hyper-util's `Display` impl shows only
 //!   the kind ("Connect"); the real cause (ECONNREFUSED, TLS, DNS, etc.)
@@ -306,13 +306,13 @@ async fn forward_inner(
     // ── auth module (per-route JWT validation) ────────────────────────────────
     if let Some(name) = &auth_name {
         let Some(validator) = auth.get(name) else {
-            tracing::error!(auth = %name, "route references missing auth — config drift");
+            tracing::error!(auth = %name, "route references missing auth - config drift");
             metrics::counter!("quik_proxy_errors_total", "kind" => "auth_misconfig").increment(1);
             record_terminal(&route_label, 500, start, None);
             return synth(StatusCode::INTERNAL_SERVER_ERROR, "auth misconfigured\n");
         };
         // Take an owned copy of the token so the immutable borrow on parts
-        // doesn't outlive the call — validate_and_inject needs a mutable
+        // doesn't outlive the call - validate_and_inject needs a mutable
         // borrow on the same HeaderMap to write the injected headers.
         let token = match extract_bearer_token(&parts.headers).map(|t| t.to_owned()) {
             Some(t) => t,
@@ -383,7 +383,7 @@ async fn forward_inner(
 
     // Load the live member list (single Arc clone), pick, then promote the
     // returned &Arc<Upstream> to an owned Arc so the rest of the request
-    // outlives the snapshot — an admin writer may swap the member list at
+    // outlives the snapshot - an admin writer may swap the member list at
     // any point. The chosen Arc<Upstream> stays valid because its refcount
     // is held by this request frame.
     let members_snap = pool.members_snapshot();
@@ -439,13 +439,13 @@ async fn forward_inner(
         .map(|s| s.to_string());
 
     parts.uri = new_uri;
-    // Upstream HTTP version is decided per-pool via config — NOT inherited
+    // Upstream HTTP version is decided per-pool via config - NOT inherited
     // from the inbound request. Inheriting h2 to a backend that's h1-only
     // (Proxmox, lots of admin UIs, most legacy APIs) produces hyper-util's
     // `UserUnsupportedVersion`. Default is h1; opt into h2 per pool only
     // for backends you've verified speak it (e.g. gRPC). The connector's
     // ALPN advertisement is matched, so the negotiated TLS connection is
-    // always the correct protocol — see upstream::build_client.
+    // always the correct protocol - see upstream::build_client.
     parts.version = match pool.http_version {
         crate::config::UpstreamHttpVersion::H1 => http::Version::HTTP_11,
         crate::config::UpstreamHttpVersion::H2 => http::Version::HTTP_2,
@@ -477,7 +477,7 @@ async fn forward_inner(
     // Content-Length pre-check above handles the declared-size case. For
     // chunked / streaming uploads without Content-Length, wrap the body so it
     // errors past the byte limit. The upstream sees a body-read failure,
-    // which surfaces to us as a normal upstream error response — the client
+    // which surfaces to us as a normal upstream error response - the client
     // doesn't get a 413 for the chunked case (we've already started forwarding).
     let body: ProxyBody = match modules.max_body_bytes {
         Some(max) => into_proxy_body(Limited::new(body, max as usize)),
@@ -489,7 +489,7 @@ async fn forward_inner(
     let out_req = Request::from_parts(parts, body);
 
     // Approximate headers + request line into the sent counter. Approximate
-    // because HTTP/2 sends HPACK-compressed headers on the wire — we count
+    // because HTTP/2 sends HPACK-compressed headers on the wire - we count
     // the logical (uncompressed) size, which is more useful as a "what does
     // this request actually contain" signal than the on-wire byte count.
     // The body counter (above) continues counting data frames as they
@@ -535,7 +535,7 @@ async fn forward_inner(
     }
 
     let (mut resp_parts, resp_body) = resp.into_parts();
-    // Count response head bytes BEFORE strip_hop_by_hop mutates the headers —
+    // Count response head bytes BEFORE strip_hop_by_hop mutates the headers -
     // we want to attribute what arrived from the upstream, not what we then
     // chose to forward.
     target
@@ -564,9 +564,9 @@ fn approx_request_head_size<B>(req: &Request<B>) -> u64 {
     request_line + headers_byte_size(req.headers())
 }
 
-/// Same idea for a response — status line + headers.
+/// Same idea for a response - status line + headers.
 fn approx_response_head_size(parts: &http::response::Parts) -> u64 {
-    // "HTTP/1.1 ddd RR\r\n" — 9 for "HTTP/1.1 ", 3 for status code,
+    // "HTTP/1.1 ddd RR\r\n" - 9 for "HTTP/1.1 ", 3 for status code,
     // 1 for space, len of reason phrase, 2 for CRLF
     let reason_len = parts
         .status
@@ -578,7 +578,7 @@ fn approx_response_head_size(parts: &http::response::Parts) -> u64 {
 }
 
 fn headers_byte_size(headers: &http::HeaderMap) -> u64 {
-    // "Name: value\r\n" — 2 for ": ", 2 for CRLF, plus the final CRLF
+    // "Name: value\r\n" - 2 for ": ", 2 for CRLF, plus the final CRLF
     // separator between headers and body.
     headers
         .iter()
@@ -588,7 +588,7 @@ fn headers_byte_size(headers: &http::HeaderMap) -> u64 {
 }
 
 /// Walk an error chain into a single string. hyper-util's `Display` impl is
-/// just the error kind ("Connect", "Body", etc.) — the actual cause is in
+/// just the error kind ("Connect", "Body", etc.) - the actual cause is in
 /// `.source()`. Without this helper, operators see "Connect" and have no
 /// idea whether it was refused / unreachable / TLS / DNS / etc.
 fn error_chain<E: std::error::Error + ?Sized>(e: &E) -> String {
@@ -634,7 +634,7 @@ fn record_terminal(route: &Arc<str>, status: u16, start: Instant, upstream: Opti
     .record(duration.as_secs_f64());
 
     // Single structured access-log event per request. Span context attaches
-    // method/path/peer/request_id automatically — we only emit the fields
+    // method/path/peer/request_id automatically - we only emit the fields
     // that aren't already on the span. Operators can silence access with
     // `RUST_LOG=quik::access=off` or isolate with `quik::access=info,quik=warn`.
     tracing::info!(
@@ -685,14 +685,14 @@ fn rewrite_path_and_query(uri: &Uri, strip: Option<&str>) -> PathAndQuery {
 }
 
 /// Configure the inbound hyper-util ServerBuilder from the parsed limits.
-/// Each knob is only applied when set to a non-zero value — operators who
+/// Each knob is only applied when set to a non-zero value - operators who
 /// want to defer to hyper-util's default for a particular axis can set 0.
 fn apply_listener_limits(
     builder: &mut ServerBuilder<TokioExecutor>,
     limits: &crate::config::ListenerLimitsConfig,
 ) {
     // Header-read and h2 keep-alive timers require an explicit timer impl
-    // — without this, hyper panics at runtime when the timer fires.
+    // - without this, hyper panics at runtime when the timer fires.
     builder.http1().timer(TokioTimer::new());
     builder.http2().timer(TokioTimer::new());
 
@@ -832,10 +832,10 @@ async fn handle_ws_upgrade(
     parts.uri = new_uri;
     parts.version = http::Version::HTTP_11; // WS handshake is HTTP/1.1
     parts.headers.remove(HOST);
-    // IMPORTANT: do NOT call strip_hop_by_hop on a WS upgrade — Upgrade and
+    // IMPORTANT: do NOT call strip_hop_by_hop on a WS upgrade - Upgrade and
     // Connection must be forwarded for the handshake.
 
-    // Identity / forwarding headers still apply on WS upgrades — the backend
+    // Identity / forwarding headers still apply on WS upgrades - the backend
     // wants to know the original client IP / host even for upgrades.
     ensure_request_id(&mut parts.headers);
     ensure_traceparent(&mut parts.headers);
@@ -869,7 +869,7 @@ async fn handle_ws_upgrade(
     let status = upstream_resp.status();
 
     if status != StatusCode::SWITCHING_PROTOCOLS {
-        // Upstream declined the upgrade — pass its response through unmodified.
+        // Upstream declined the upgrade - pass its response through unmodified.
         let (parts, body) = upstream_resp.into_parts();
         record_terminal(&route_label, status.as_u16(), start, Some(&target_name));
         return Response::from_parts(parts, into_proxy_body(body));
@@ -903,7 +903,7 @@ async fn handle_ws_upgrade(
         let mut upstream = TokioIo::new(upstream_io);
 
         // Race the bidirectional copy against drain. On drain start the
-        // tunnel is dropped — clients on long-lived WS connections see a
+        // tunnel is dropped - clients on long-lived WS connections see a
         // disconnect and reconnect against the new proxy. This is the
         // expected behaviour for graceful proxy rollover.
         let copy = tokio::io::copy_bidirectional(&mut inbound, &mut upstream);
@@ -914,7 +914,7 @@ async fn handle_ws_upgrade(
                 // hard upper-bound deadline that resets when application
                 // pings traverse the tunnel. WS protocols that need long
                 // idle periods (>5min default) set their own ping interval
-                // shorter than this — the idle timeout culls tunnels with
+                // shorter than this - the idle timeout culls tunnels with
                 // no application-level keepalive at all.
                 let deadline = Duration::from_millis(idle_timeout_ms);
                 match tokio::time::timeout(deadline, copy).await {
@@ -949,7 +949,7 @@ async fn handle_ws_upgrade(
             _ = shutdown_for_task.wait_for_drain_start() => {
                 tracing::info!(
                     upstream = %target_name,
-                    "ws tunnel closed on drain — client should reconnect"
+                    "ws tunnel closed on drain - client should reconnect"
                 );
             }
         }

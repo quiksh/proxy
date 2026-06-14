@@ -5,7 +5,7 @@
 //!   any header name listed inside the `Connection` header itself.
 //! - **Identity headers** ([`ensure_request_id`], [`ensure_traceparent`])
 //!   pass through inbound values when valid, otherwise generate fresh ones.
-//!   IDs are CSPRNG-backed (`getrandom::fill`) — same cost as a non-CSPRNG
+//!   IDs are CSPRNG-backed (`getrandom::fill`) - same cost as a non-CSPRNG
 //!   on modern OSes and removes any "what if this leaks into an
 //!   authorisation context" footgun.
 //! - **`X-Forwarded-*` injection.** Whether the inbound chain is trusted is
@@ -53,7 +53,7 @@ pub fn strip_hop_by_hop(headers: &mut HeaderMap) {
     headers.remove("keep-alive");
 }
 
-// ── Random helpers (hand-rolled — see audit, replaces the `uuid` dep) ────────
+// ── Random helpers (hand-rolled - see audit, replaces the `uuid` dep) ────────
 
 fn fill_random(buf: &mut [u8]) {
     // getrandom failing means the OS RNG is broken; nothing useful to do.

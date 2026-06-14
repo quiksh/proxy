@@ -1,4 +1,4 @@
-# NATS service registration — examples
+# NATS service registration - examples
 
 Backends register themselves into a NATS JetStream KV bucket; quik (built with
 `--features nats`) watches the bucket and reconciles them into a pool. See
@@ -37,7 +37,7 @@ nats kv watch quik_registrations 'reg.shop.checkout.>'      # live add/delete fe
 # what quik resolved it into
 curl -s localhost:9090/admin/pools/checkout | jq '.members[].address'
 
-# operator-drain an instance — durable override, applied by the watcher
+# operator-drain an instance - durable override, applied by the watcher
 nats kv put quik_registrations override.shop.checkout.checkout-1 '{"action":"drain"}'
 nats kv del quik_registrations override.shop.checkout.checkout-1     # undrain
 
@@ -50,17 +50,17 @@ curl -s localhost:9090/metrics | grep -E 'quik_nats_|quik_pool_member_'
 
 ## Addresses & the allow-list
 
-The pool's `allow_addresses` gates which addresses a registration may claim — a
+The pool's `allow_addresses` gates which addresses a registration may claim - a
 self-asserted address outside it is rejected (and counted on
 `quik_nats_registration_rejected_total`). In these examples backends register as
 `<name>.svc:8080` (a docker network alias), so a single `".svc"` host-suffix
 admits the group; in a real homelab this is typically your LAN CIDR
-(`["192.168.0.0/16"]`). Keep it as tight as the deployment allows — see the
+(`["192.168.0.0/16"]`). Keep it as tight as the deployment allows - see the
 "intra-allow-list" residual in the design doc.
 
 ## Auth
 
-The bundled stacks run **no-auth NATS** so they come up in one command — fine on
+The bundled stacks run **no-auth NATS** so they come up in one command - fine on
 a laptop / trusted LAN, never beyond it. For anything real use decentralised JWT
 credentials:
 

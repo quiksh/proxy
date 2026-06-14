@@ -1,4 +1,4 @@
-//! Admin load test — add and remove members while sustained traffic flows.
+//! Admin load test - add and remove members while sustained traffic flows.
 //!
 //! Validates the lock-free Arc-slice swap inside `UpstreamPoolEntry.members`.
 //! A failure here would manifest as 5xx (the proxy returned no_eligible_upstream
@@ -6,7 +6,7 @@
 //! freed). The design intent is that neither can happen.
 //!
 //! Kept light (~1k requests in ~3 seconds) so CI runs in a reasonable budget.
-//! The signal is the same as a longer run — the swap is either correct or
+//! The signal is the same as a longer run - the swap is either correct or
 //! it isn't.
 
 mod common;
@@ -55,7 +55,7 @@ async fn add_and_remove_under_traffic_with_zero_failed_requests() {
     let stop = Arc::new(AtomicBool::new(false));
 
     // Spawn N concurrent workers, each looping until `stop` is set. The
-    // stop flag is checked between requests — no inner-loop polling timers.
+    // stop flag is checked between requests - no inner-loop polling timers.
     let worker_count = 16;
     let mut workers = Vec::new();
     for _ in 0..worker_count {
@@ -158,7 +158,7 @@ async fn add_and_remove_under_traffic_with_zero_failed_requests() {
     assert_eq!(cerr, 0, "expected 0 connect errors, got {cerr}");
 
     // Sanity: all three backends saw work. (a was added at start + removed
-    // mid-stream, c was added mid-stream — both should have traffic.)
+    // mid-stream, c was added mid-stream - both should have traffic.)
     assert!(
         !a.calls().is_empty(),
         "backend a saw no traffic before drain"

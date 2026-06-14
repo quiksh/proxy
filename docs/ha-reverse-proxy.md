@@ -12,18 +12,18 @@ shape and the reasoning.
 
 A quik config has three top-level concepts:
 
-- **Upstreams** — pools of backend instances. Each pool has a load-balancing
+- **Upstreams** - pools of backend instances. Each pool has a load-balancing
   policy and (optionally) health-check settings.
-- **Routes** — first-class request matchers (host, method, path) that pick
+- **Routes** - first-class request matchers (host, method, path) that pick
   which upstream pool serves a given request. Optional modules apply
   per-route timeouts, body limits, prefix rewriting, and JWT auth.
-- **Modules** — applied per-route. Currently: `timeout_ms`, `max_body_bytes`,
+- **Modules** - applied per-route. Currently: `timeout_ms`, `max_body_bytes`,
   `strip_prefix`, `auth`. Each one is absent unless the key is set.
 
 Two listeners run alongside each other:
 
-- `[listener]` — the proxy port. TLS terminated here.
-- `[admin]` — `/healthz`, `/metrics`, and (optionally) the
+- `[listener]` - the proxy port. TLS terminated here.
+- `[admin]` - `/healthz`, `/metrics`, and (optionally) the
   [admin API](admin-api.md) for online changes.
 
 ## Minimal HA config
@@ -66,7 +66,7 @@ tightening.
 ## Routing
 
 A request matches a route when every matcher present on the route matches.
-A route with no matchers matches everything — useful as a catchall.
+A route with no matchers matches everything - useful as a catchall.
 
 | Matcher        | Meaning                                                       |
 |----------------|---------------------------------------------------------------|
@@ -88,7 +88,7 @@ Three balancers, picked per pool:
 | Balancer            | Cost per pick     | When to use                                                                 |
 |---------------------|-------------------|-----------------------------------------------------------------------------|
 | `round_robin`       | One `fetch_add`   | Default. Backends are roughly homogeneous; even distribution matters more than tail latency. |
-| `random`            | One multiplicative hash | Same cost as round-robin, no shared counter across CPUs — useful at very high QPS where the round-robin atomic is contended. |
+| `random`            | One multiplicative hash | Same cost as round-robin, no shared counter across CPUs - useful at very high QPS where the round-robin atomic is contended. |
 | `least_connections` | One pool scan     | Backends have heterogeneous response times. The LB steers away from slow ones automatically because their in-flight counts climb. |
 
 All three skip ejected members (see passive health, below). Inflight
@@ -109,12 +109,12 @@ ejection_base_ms   = 1000       # initial cool-off
 ejection_max_ms    = 60000      # exponential backoff cap
 ```
 
-After the window expires, the next pick acts as a half-open probe — one
+After the window expires, the next pick acts as a half-open probe - one
 request hits the backend. Success clears the ejection state. Failure
 doubles the backoff (1s → 2s → 4s → … capped at `ejection_max_ms`).
 
 If every member of a pool is currently ejected, the proxy returns
-`503 — no upstream available` and increments
+`503 - no upstream available` and increments
 `quik_proxy_errors_total{kind="no_eligible_upstream"}`.
 
 Every ejection is logged at WARN and counted in
@@ -124,7 +124,7 @@ Every ejection is logged at WARN and counted in
 
 Optional. When enabled, a single task per pool sends HTTP probes to each
 member at a fixed interval. Probe traffic does not count toward request
-metrics — it lives entirely under `quik_active_health_check_*`.
+metrics - it lives entirely under `quik_active_health_check_*`.
 
 ```toml
 [upstreams.active_health]
@@ -139,7 +139,7 @@ expected_status     = 200           # or "200-299"
 initial_state       = "unhealthy"   # or "healthy"
 ```
 
-Active and passive health are orthogonal — a backend has to pass both checks
+Active and passive health are orthogonal - a backend has to pass both checks
 to be eligible. `initial_state = "unhealthy"` is the pessimistic default:
 backends don't take traffic until the probe confirms they're up. Switch to
 `"healthy"` if downtime is more expensive than the risk of routing briefly
@@ -187,7 +187,7 @@ http_version = "h2"
 members = [{ address = "grpc.internal:443", scheme = "https" }]
 ```
 
-Use h2 only for backends you've verified can speak HTTP/2 — most legacy HTTP
+Use h2 only for backends you've verified can speak HTTP/2 - most legacy HTTP
 services can't. The default is `h1` for compatibility.
 
 ## JWT authentication
@@ -222,7 +222,7 @@ Per-request behaviour:
   `outcome="spoofed_header"` in metrics
 
 Reserved headers are exactly the ones listed under `inject_headers`. Setting
-one on the inbound request is rejected — quik refuses to silently overwrite
+one on the inbound request is rejected - quik refuses to silently overwrite
 them. This catches both deliberate spoofing and accidental forwarding from
 an upstream-of-upstream proxy.
 
@@ -243,7 +243,7 @@ On every forwarded request, quik adds:
 | `X-Forwarded-Proto` | `https` (inbound is always TLS).                                                    |
 
 `mode = "edge"` is the right default when quik sits at the network boundary
-— it normalises whatever a client might have sent. Use `mode = "host"` when
+- it normalises whatever a client might have sent. Use `mode = "host"` when
 quik runs behind another L7 proxy (e.g. an AWS ALB) and you want to extend
 its forwarded chain rather than replace it.
 
@@ -300,7 +300,7 @@ also speaks HTTP and is doing the certificate management. Set
 `mode = "host"` so quik appends to the LB's `X-Forwarded-For` chain
 instead of overwriting it.
 
-**Rolling backend deploys.** Use the [admin API](admin-api.md) — drain old
+**Rolling backend deploys.** Use the [admin API](admin-api.md) - drain old
 members, observe `/admin/pools/{pool}` until they're empty, add new ones,
 delete the drained ones. No proxy restart, no dropped requests.
 
@@ -311,7 +311,7 @@ drain) is the right thing for keepalived or a TCP healthcheck to watch.
 
 ## What to read next
 
-- [Admin API](admin-api.md) — add/drain/remove members on a running proxy.
-- [Hardening](hardening.md) — defensive timeouts and limits for direct-to-public deployments.
-- [Config reference](config-reference.md) — every field, every default.
-- [Forward proxy](forward-proxy.md) — same binary, second role.
+- [Admin API](admin-api.md) - add/drain/remove members on a running proxy.
+- [Hardening](hardening.md) - defensive timeouts and limits for direct-to-public deployments.
+- [Config reference](config-reference.md) - every field, every default.
+- [Forward proxy](forward-proxy.md) - same binary, second role.

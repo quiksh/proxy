@@ -43,7 +43,7 @@ async fn spawn_egress(rules: Vec<EgressRuleConfig>, default: EgressAction) -> st
 
 /// Read up to `n` bytes from `stream` with a short timeout, returning the
 /// portion actually read as UTF-8 (or replacement characters for bytes
-/// that aren't valid UTF-8 — fine for HTTP response sniffing).
+/// that aren't valid UTF-8 - fine for HTTP response sniffing).
 async fn read_some(stream: &mut TcpStream, n: usize) -> String {
     let mut buf = vec![0u8; n];
     let got = match tokio::time::timeout(Duration::from_millis(500), stream.read(&mut buf)).await {
@@ -57,7 +57,7 @@ async fn read_some(stream: &mut TcpStream, n: usize) -> String {
 async fn egress_allows_destination_that_matches_a_cidr_rule() {
     let dest = Backend::spawn("dest").await;
 
-    // Allow anything in 127.0.0.0/8 — covers our test backend on localhost.
+    // Allow anything in 127.0.0.0/8 - covers our test backend on localhost.
     let egress_addr = spawn_egress(
         vec![EgressRuleConfig {
             action: EgressAction::Allow,
@@ -84,7 +84,7 @@ async fn egress_allows_destination_that_matches_a_cidr_rule() {
         "expected 200 Connection Established, got: {resp:?}"
     );
 
-    // Now use the tunnel as a plain pipe to the destination — send an HTTP
+    // Now use the tunnel as a plain pipe to the destination - send an HTTP
     // request through it and confirm the backend saw it.
     let inner = "GET /hello HTTP/1.1\r\nHost: dest\r\nConnection: close\r\n\r\n";
     tunnel.write_all(inner.as_bytes()).await.unwrap();
@@ -194,7 +194,7 @@ async fn egress_basic_log_only_requires_proxy_authorization() {
     );
 
     // With a Proxy-Authorization header → allowed; the username is recorded
-    // (we don't validate the password — pure audit-trail mode).
+    // (we don't validate the password - pure audit-trail mode).
     use base64::Engine;
     let creds = base64::engine::general_purpose::STANDARD.encode(b"alice:whatever");
     let mut tunnel = TcpStream::connect(egress_addr).await.unwrap();
