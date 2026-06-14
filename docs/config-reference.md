@@ -1,6 +1,6 @@
 # Config reference
 
-The full TOML schema. Most fields have sensible defaults — this page lists
+The full TOML schema. Most fields have sensible defaults - this page lists
 every option, what it does, and what the default is. For commentary and
 example deployments, see the scenario guides:
 
@@ -23,7 +23,7 @@ mode = "edge"
 
 Strings of the form `${VAR}` or `${VAR:-default}` are expanded from the
 proxy's environment before TOML parsing. Expansion runs on the raw text,
-so the same syntax in a comment is also expanded — keep `${…}` out of
+so the same syntax in a comment is also expanded - keep `${…}` out of
 comments unless you want it substituted.
 
 A missing `${VAR}` with no default fails boot loudly.
@@ -66,7 +66,7 @@ Defensive connection-level timeouts and HTTP/2 caps. See
 
 ## `[admin]`
 
-The admin listener — `/healthz`, `/metrics`, and the `/admin/pools` API.
+The admin listener - `/healthz`, `/metrics`, and the `/admin/pools` API.
 
 ```toml
 [admin]
@@ -201,6 +201,12 @@ timeout_ms = 60000
 | `ejection_max_ms`    | u64  | `60000`  | Exponential cap. Re-admission probe on window end.  |
 
 ### `[upstreams.active_health]`
+
+This is quik's **routing/readiness** probe - "should traffic go to this member
+right now?" - run by quik itself from its own vantage point, independent of how
+the member was added. For NATS-backed pools it is distinct from the registrant's
+**liveness** gate (the `quik-register` `[liveness]` section, "should this
+instance be in the registry at all?"); see `docs/service-registration.md` §6.
 
 | Field                  | Type                          | Default            | Notes                                                               |
 |------------------------|-------------------------------|--------------------|---------------------------------------------------------------------|
@@ -391,7 +397,7 @@ CIDR-based denies catch DNS-aliased bypasses.
 ## `[nats]`
 
 Optional NATS-backed service registration. **Only acted upon in a build with
-`--features nats`** — a config that uses `[nats]`/`[upstreams.nats]` on a default
+`--features nats`** - a config that uses `[nats]`/`[upstreams.nats]` on a default
 binary fails boot loudly. See [service-registration.md](service-registration.md).
 
 ```toml
@@ -403,13 +409,13 @@ creds_file = "/etc/quik/quik.creds"
 
 | Field            | Default | Notes                                                        |
 |------------------|---------|--------------------------------------------------------------|
-| `url`            | —       | Required. `nats://…` or `tls://…`.                           |
-| `bucket`         | —       | Required. JetStream KV bucket holding registrations.         |
+| `url`            | -       | Required. `nats://…` or `tls://…`.                           |
+| `bucket`         | -       | Required. JetStream KV bucket holding registrations.         |
 | `creds_file`     | none    | Path to a decentralised-JWT `.creds` file. Omit for no-auth (local only). |
 | `reconnect_secs` | `5`     | Pause between reconnect attempts while NATS is unreachable.   |
 
 When NATS is down (at boot or later) the proxy serves last-known / static-config
-membership and keeps retrying — it never fails on the NATS dependency, and a
+membership and keeps retrying - it never fails on the NATS dependency, and a
 disconnect never flushes members.
 
 ### `[upstreams.nats]`
@@ -430,9 +436,9 @@ max_instances_per_service  = 50
 
 | Field                       | Default | Notes                                                            |
 |-----------------------------|---------|------------------------------------------------------------------|
-| `subject`                   | —       | Required. KV subject subtree feeding this pool, e.g. `reg.shop.checkout.>`. |
-| `allow_addresses`           | —       | **Required, non-empty** (H1). CIDR (`10.0.0.0/8`), bare IP, or host-suffix (`.svc.local`). A self-asserted address outside this set is rejected. Fails *safe*. |
-| `max_members`               | none    | Backstop cap on total pool members (H2). Size **well above** the real fleet — a tight cap fails *unsafe* (locks out scale-up). |
+| `subject`                   | -       | Required. KV subject subtree feeding this pool, e.g. `reg.shop.checkout.>`. Must end with a wildcard (`>`/`*`) **and** have a literal prefix before it (a bare `>` is rejected - it matches nothing). |
+| `allow_addresses`           | -       | **Required, non-empty** (H1). CIDR (`10.0.0.0/8`), bare IP, or host-suffix (`.svc.local`). A self-asserted address outside this set is rejected. Fails *safe*. **Prefer CIDRs** - a host-suffix admits a hostname and trusts DNS to resolve it (see the design doc's DNS-trust residual). |
+| `max_members`               | none    | Backstop cap on total pool members (H2). Size **well above** the real fleet - a tight cap fails *unsafe* (locks out scale-up). |
 | `max_instances_per_service` | none    | Cap per `reg.<ns>.<service>.*` (H2, the surgical control). |
 
 The operator-override subtree (`override.<…>`, derived from `subject`) is watched

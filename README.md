@@ -12,7 +12,7 @@ on the hot path.
 quik --config config/example.toml
 ```
 
-— that's the whole interface. Configuration is one TOML file. Updates to the
+- that's the whole interface. Configuration is one TOML file. Updates to the
 running fleet (adding a backend, draining one for replacement) go through a
 small HTTP admin API.
 
@@ -23,7 +23,7 @@ small HTTP admin API.
 - **HTTP/1.1 + HTTP/2** on the inbound listener (ALPN-negotiated).
 - **TLS termination** via [rustls] (no OpenSSL).
 - **WebSockets**, **SSE**, **gRPC trailers** all forwarded transparently.
-- **Routing** by host, method, exact path, or segment-aware prefix —
+- **Routing** by host, method, exact path, or segment-aware prefix -
   most-specific match wins.
 - **Per-route modules**: timeout, max body size, prefix stripping, JWT auth.
 - **JWT authentication** with JWKS auto-refresh on `kid` miss; verified
@@ -34,13 +34,13 @@ small HTTP admin API.
 - **Online member management** via a separate admin listener: add, drain,
   undrain, or remove members without restarting.
 - **Service registration** (optional `nats` feature): backends self-register
-  into a NATS JetStream KV bucket and quik reconciles them into the pool — with
+  into a NATS JetStream KV bucket and quik reconciles them into the pool - with
   a registrable-address allow-list, member caps, and operator overrides. See
   [docs/service-registration.md](docs/service-registration.md).
-- **Optional egress (forward) proxy** mode — HTTP CONNECT with host/CIDR
+- **Optional egress (forward) proxy** mode - HTTP CONNECT with host/CIDR
   policy and SNI verification.
 - **Prometheus metrics** + **structured JSON / key-value logs**.
-- **Graceful shutdown** on `SIGTERM`/`SIGINT` — drains in-flight requests, with
+- **Graceful shutdown** on `SIGTERM`/`SIGINT` - drains in-flight requests, with
   an optional edge-withdraw grace so a perimeter stops routing first
   ([docs/graceful-shutdown.md](docs/graceful-shutdown.md)); force-exit on a
   second signal.
@@ -55,7 +55,7 @@ small HTTP admin API.
 ## Performance
 
 A single binary, ~5 MB stripped, ~30 MB RSS under load. The forwarding path
-avoids per-request allocations where it can — metric handles are pre-built
+avoids per-request allocations where it can - metric handles are pre-built
 per upstream member, the in-flight counter is a single atomic, and bodies
 stream end-to-end without buffering. See `benches/hot_path.rs` for the
 microbenchmarks.
@@ -86,7 +86,7 @@ cargo build --release
 cargo run --example echo_backend -- 127.0.0.1:8080 &
 
 # 4. Run the proxy. config/example.toml expects backends on :8080 and :8081
-#    — point the second one elsewhere or edit the config first.
+#    - point the second one elsewhere or edit the config first.
 ./target/release/quik --config config/example.toml
 ```
 
@@ -139,7 +139,7 @@ cargo build --release --features nats     # adds the NATS registration watcher
 ```
 src/                    proxy core
   proxy/                request handler, per-request span, modules
-  routing/              route table — exact > prefix, longest-prefix-first
+  routing/              route table - exact > prefix, longest-prefix-first
   upstream/             pools, balancers, passive + active health, drain
     nats/               NATS registration watcher (feature `nats`)
   auth/                 JWT validation, JWKS cache, claim injection
@@ -163,15 +163,16 @@ quik-register/          service-registration sidecar agent (workspace member)
 ```
 
 This is a Cargo workspace: the `quik` proxy (root) plus `quik-register`, a small
-sidecar that health-checks a backend and registers it into NATS for the proxy to
-pick up. `make build` / `make test` cover both.
+sidecar that registers a backend into NATS - gated on a liveness probe - for the
+proxy to pick up. `make build` / `make test` cover both.
 
 ## Releases
 
 Releases are cut from the **Release** workflow (`.github/workflows/release.yml`),
-triggered manually from the repo's Actions tab — there is no local `git tag` step.
+triggered manually from the repo's Actions tab - there is no local `git tag` step.
 One run computes the next version from the latest tag, pushes the new tag, and
-publishes a multi-tagged image to GHCR, all from `main`.
+publishes two multi-tagged images to GHCR - the `proxy` and the `quik-register`
+sidecar, versioned in lockstep - all from `main`.
 
 Git tags (`vX.Y.Z`) are the source of truth for the version; `Cargo.toml` stays at
 `0.0.0` and is not bumped.
@@ -179,24 +180,25 @@ Git tags (`vX.Y.Z`) are the source of truth for the version; `Cargo.toml` stays 
 To cut a release:
 
 1. Actions → **Release** → **Run workflow**.
-2. Choose the bump from the dropdown — `patch`, `minor`, or `major`. You pick the
+2. Choose the bump from the dropdown - `patch`, `minor`, or `major`. You pick the
    size of the jump; the workflow derives the actual number from the latest tag.
    You never type a version string.
-3. Run. The workflow tags the commit and pushes these image tags to
-   `ghcr.io/<owner>/<repo>`:
+3. Run. The workflow tags the commit and pushes these tags to both
+   `ghcr.io/<owner>/proxy` and `ghcr.io/<owner>/quik-register`:
 
    ```
    :1.2.3   :1.2   :1   :latest
    ```
 
-Pull the published image:
+Pull the published images:
 
 ```bash
-docker pull ghcr.io/<owner>/<repo>:latest
+docker pull ghcr.io/<owner>/proxy:latest
+docker pull ghcr.io/<owner>/quik-register:latest
 ```
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE).
+MIT - see [LICENSE](LICENSE).
 
 [rustls]: https://github.com/rustls/rustls
