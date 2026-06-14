@@ -8,20 +8,26 @@
 //!   IDs are CSPRNG-backed (`getrandom::fill`) — same cost as a non-CSPRNG
 //!   on modern OSes and removes any "what if this leaks into an
 //!   authorisation context" footgun.
-//! - **`X-Forwarded-*` injection.** XFF behaviour is mode-aware:
-//!   - [`Mode::Edge`]: inbound XFF is ignored (potentially spoofed by an
-//!     external client) and replaced with the peer IP.
-//!   - [`Mode::Host`]: inbound XFF is appended-to (we're behind another LB
-//!     that we trust to have set it correctly).
+//! - **`X-Forwarded-*` injection.** Whether the inbound chain is trusted is
+//!   decided by [`ForwardedPolicy`]:
+//!   - untrusted peer (the default in [`Mode::Edge`]): inbound XFF is ignored
+//!     (potentially spoofed by an external client) and replaced with the peer
+//!     IP.
+//!   - trusted peer ([`Mode::Host`], or an edge peer inside `trusted_proxies`):
+//!     inbound XFF is appended-to (we trust whoever set it).
+//! - **RFC 7239 `Forwarded`** ([`apply_forwarded`]) is emitted with the same
+//!   trust model, but only when [`ForwardedPolicy::emit`] is set.
 
 use std::net::IpAddr;
 
+use anyhow::{Context, Result};
 use http::header::{
     CONNECTION, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
 };
 use http::{HeaderMap, HeaderName, HeaderValue};
+use ipnet::IpNet;
 
-use crate::config::Mode;
+use crate::config::{ForwardedConfig, Mode};
 
 /// Remove RFC 7230 § 6.1 hop-by-hop headers and any header name listed in the
 /// `Connection` header itself. The proxy must not forward these to upstream
@@ -161,20 +167,124 @@ pub fn ensure_traceparent(headers: &mut HeaderMap) -> String {
     tp
 }
 
-/// Apply `X-Forwarded-For` according to mode:
-/// - `edge`: ignore anything inbound (potentially spoofed) and set XFF = peer.
-/// - `host`: append peer to the existing XFF chain (or create it if absent).
-pub fn apply_forwarded_for(headers: &mut HeaderMap, peer: IpAddr, mode: Mode) {
+/// Apply `X-Forwarded-For`:
+/// - `trusted == false`: ignore anything inbound (potentially spoofed) and set
+///   XFF = peer.
+/// - `trusted == true`: append peer to the existing XFF chain (or create it if
+///   absent).
+///
+/// The trust decision is [`ForwardedPolicy::trusts`].
+pub fn apply_forwarded_for(headers: &mut HeaderMap, peer: IpAddr, trusted: bool) {
     let peer_str = peer.to_string();
-    let new_value = match mode {
-        Mode::Edge => peer_str,
-        Mode::Host => match headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+    let new_value = if trusted {
+        match headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
             Some(existing) if !existing.is_empty() => format!("{existing}, {peer_str}"),
             _ => peer_str,
-        },
+        }
+    } else {
+        peer_str
     };
     if let Ok(v) = HeaderValue::try_from(new_value) {
         headers.insert("x-forwarded-for", v);
+    }
+}
+
+/// Apply the RFC 7239 `Forwarded` header. Mirrors [`apply_forwarded_for`]'s
+/// trust model: a trusted peer's existing chain is appended to, an untrusted
+/// peer's is replaced. `host` is the inbound `Host` / `:authority`; `proto` is
+/// always `https` because the proxy terminates TLS.
+///
+/// Each element is `for=<node>;host="<host>";proto=https`. Per RFC 7239 §6 an
+/// IPv6 `node` must be bracketed and the whole identifier quoted; `host` is
+/// quoted defensively because a `Host` with a port contains a `:`, which is not
+/// a bare token.
+pub fn apply_forwarded(headers: &mut HeaderMap, peer: IpAddr, host: Option<&str>, trusted: bool) {
+    let mut element = format!("for={}", forwarded_node(peer));
+    if let Some(h) = host
+        && !h.contains('"')
+    {
+        element.push_str(";host=\"");
+        element.push_str(h);
+        element.push('"');
+    }
+    element.push_str(";proto=https");
+
+    let new_value = if trusted {
+        match headers.get("forwarded").and_then(|v| v.to_str().ok()) {
+            Some(existing) if !existing.is_empty() => format!("{existing}, {element}"),
+            _ => element,
+        }
+    } else {
+        element
+    };
+    if let Ok(v) = HeaderValue::try_from(new_value) {
+        headers.insert("forwarded", v);
+    }
+}
+
+/// Format an IP as an RFC 7239 `node` identifier. IPv4 is a bare literal; IPv6
+/// is bracketed and quoted because it contains `:`.
+fn forwarded_node(ip: IpAddr) -> String {
+    match ip {
+        IpAddr::V4(v4) => v4.to_string(),
+        IpAddr::V6(v6) => format!("\"[{v6}]\""),
+    }
+}
+
+/// Parse a single `trusted_proxies` entry: a CIDR (`10.0.0.0/8`) or a bare IP
+/// literal (treated as a single-host `/32` or `/128`). Shared with config
+/// validation so a bad entry fails at startup, not silently at runtime.
+pub fn parse_trusted_proxy(entry: &str) -> Result<IpNet> {
+    if entry.contains('/') {
+        entry
+            .parse::<IpNet>()
+            .with_context(|| format!("invalid CIDR '{entry}'"))
+    } else {
+        let ip: IpAddr = entry
+            .parse()
+            .with_context(|| format!("invalid IP literal '{entry}'"))?;
+        Ok(match ip {
+            IpAddr::V4(v4) => IpNet::V4(v4.into()),
+            IpAddr::V6(v6) => IpNet::V6(v6.into()),
+        })
+    }
+}
+
+/// Compiled forwarding policy: which immediate peers we trust to have set the
+/// forwarding chain, and whether to also emit RFC 7239 `Forwarded`. Built once
+/// at startup from [`ForwardedConfig`] and shared across the hot path.
+#[derive(Debug, Default)]
+pub struct ForwardedPolicy {
+    trusted_proxies: Vec<IpNet>,
+    /// Also emit the RFC 7239 `Forwarded` header.
+    pub emit: bool,
+}
+
+impl ForwardedPolicy {
+    /// Compile from config. Entries are assumed pre-validated by
+    /// `config::validate`; an unexpected bad entry here is skipped rather than
+    /// panicking on the hot path's behalf.
+    pub fn from_config(cfg: &ForwardedConfig) -> Self {
+        let trusted_proxies = cfg
+            .trusted_proxies
+            .iter()
+            .filter_map(|e| parse_trusted_proxy(e).ok())
+            .collect();
+        Self {
+            trusted_proxies,
+            emit: cfg.emit,
+        }
+    }
+
+    /// Whether we trust the inbound forwarding chain from this peer (and so
+    /// should *append* our observed peer rather than *replace* the chain).
+    /// `host` mode trusts by definition; `edge` mode trusts only peers inside
+    /// `trusted_proxies`.
+    pub fn trusts(&self, peer: IpAddr, mode: Mode) -> bool {
+        match mode {
+            Mode::Host => true,
+            Mode::Edge => self.trusted_proxies.iter().any(|n| n.contains(&peer)),
+        }
     }
 }
 
@@ -304,21 +414,21 @@ mod tests {
     }
 
     #[test]
-    fn xff_edge_mode_replaces() {
+    fn xff_untrusted_replaces() {
         let mut h = HeaderMap::new();
         h.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.99")); // spoofed
-        apply_forwarded_for(&mut h, "10.0.0.5".parse().unwrap(), Mode::Edge);
+        apply_forwarded_for(&mut h, "10.0.0.5".parse().unwrap(), false);
         assert_eq!(h.get("x-forwarded-for").unwrap(), "10.0.0.5");
     }
 
     #[test]
-    fn xff_host_mode_appends() {
+    fn xff_trusted_appends() {
         let mut h = HeaderMap::new();
         h.insert(
             "x-forwarded-for",
             HeaderValue::from_static("203.0.113.99, 10.0.0.1"),
         );
-        apply_forwarded_for(&mut h, "10.0.0.5".parse().unwrap(), Mode::Host);
+        apply_forwarded_for(&mut h, "10.0.0.5".parse().unwrap(), true);
         assert_eq!(
             h.get("x-forwarded-for").unwrap(),
             "203.0.113.99, 10.0.0.1, 10.0.0.5"
@@ -326,9 +436,95 @@ mod tests {
     }
 
     #[test]
-    fn xff_host_mode_creates_when_absent() {
+    fn xff_trusted_creates_when_absent() {
         let mut h = HeaderMap::new();
-        apply_forwarded_for(&mut h, "10.0.0.5".parse().unwrap(), Mode::Host);
+        apply_forwarded_for(&mut h, "10.0.0.5".parse().unwrap(), true);
         assert_eq!(h.get("x-forwarded-for").unwrap(), "10.0.0.5");
+    }
+
+    fn policy(trusted: &[&str], emit: bool) -> ForwardedPolicy {
+        ForwardedPolicy::from_config(&ForwardedConfig {
+            trusted_proxies: trusted.iter().map(|s| s.to_string()).collect(),
+            emit,
+        })
+    }
+
+    #[test]
+    fn host_mode_always_trusts() {
+        let p = policy(&[], false);
+        assert!(p.trusts("203.0.113.7".parse().unwrap(), Mode::Host));
+    }
+
+    #[test]
+    fn edge_mode_trusts_only_listed_proxies() {
+        let p = policy(&["10.0.0.0/8", "192.168.1.5"], false);
+        // CIDR match, exact-IP match, and a non-member.
+        assert!(p.trusts("10.4.2.1".parse().unwrap(), Mode::Edge));
+        assert!(p.trusts("192.168.1.5".parse().unwrap(), Mode::Edge));
+        assert!(!p.trusts("203.0.113.7".parse().unwrap(), Mode::Edge));
+    }
+
+    #[test]
+    fn edge_mode_with_no_trusted_proxies_trusts_nobody() {
+        let p = policy(&[], false);
+        assert!(!p.trusts("10.0.0.5".parse().unwrap(), Mode::Edge));
+    }
+
+    #[test]
+    fn forwarded_untrusted_replaces_with_single_element() {
+        let mut h = HeaderMap::new();
+        h.insert("forwarded", HeaderValue::from_static("for=1.2.3.4")); // spoofed
+        apply_forwarded(
+            &mut h,
+            "10.0.0.5".parse().unwrap(),
+            Some("api.example.com"),
+            false,
+        );
+        assert_eq!(
+            h.get("forwarded").unwrap(),
+            "for=10.0.0.5;host=\"api.example.com\";proto=https"
+        );
+    }
+
+    #[test]
+    fn forwarded_trusted_appends() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            "forwarded",
+            HeaderValue::from_static("for=203.0.113.9;proto=https"),
+        );
+        apply_forwarded(&mut h, "10.0.0.5".parse().unwrap(), None, true);
+        assert_eq!(
+            h.get("forwarded").unwrap(),
+            "for=203.0.113.9;proto=https, for=10.0.0.5;proto=https"
+        );
+    }
+
+    #[test]
+    fn forwarded_ipv6_node_is_bracketed_and_quoted() {
+        let mut h = HeaderMap::new();
+        apply_forwarded(&mut h, "2001:db8::1".parse().unwrap(), None, false);
+        assert_eq!(
+            h.get("forwarded").unwrap(),
+            "for=\"[2001:db8::1]\";proto=https"
+        );
+    }
+
+    #[test]
+    fn forwarded_drops_host_containing_quote() {
+        // A spoofed Host with an embedded quote must not break out of the
+        // quoted-string; we simply omit the host param.
+        let mut h = HeaderMap::new();
+        apply_forwarded(&mut h, "10.0.0.5".parse().unwrap(), Some("e\"vil"), false);
+        assert_eq!(h.get("forwarded").unwrap(), "for=10.0.0.5;proto=https");
+    }
+
+    #[test]
+    fn parse_trusted_proxy_accepts_cidr_and_bare_ip() {
+        assert!(parse_trusted_proxy("10.0.0.0/8").is_ok());
+        assert!(parse_trusted_proxy("192.168.1.5").is_ok());
+        assert!(parse_trusted_proxy("2001:db8::/32").is_ok());
+        assert!(parse_trusted_proxy("not-an-ip").is_err());
+        assert!(parse_trusted_proxy("10.0.0.0/99").is_err());
     }
 }

@@ -1224,6 +1224,118 @@ async fn xff_host_mode_appends_to_existing_chain() {
 }
 
 #[tokio::test]
+async fn xff_edge_mode_trusts_listed_proxy_and_appends() {
+    use quik::config::{ForwardedConfig, Mode};
+    let backend = Backend::spawn("a").await;
+    // Loopback is the peer in tests, so trusting 127.0.0.0/8 makes this
+    // request behave as if it came from a trusted upstream proxy.
+    let proxy = common::spawn_proxy_with_forwarded(
+        ProxySpec {
+            pools: vec![common::Backends::http("p", vec![backend.addr])],
+            routes: vec![route("/", "p")],
+        },
+        Mode::Edge,
+        ForwardedConfig {
+            trusted_proxies: vec!["127.0.0.0/8".to_string()],
+            emit: false,
+        },
+    )
+    .await;
+    let client = https_client_http1_only();
+
+    let resp = client
+        .get(url(proxy.addr, "/x"))
+        .header("x-forwarded-for", "203.0.113.5") // set by the trusted proxy
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let xff = backend.calls()[0]
+        .headers
+        .get("x-forwarded-for")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        xff, "203.0.113.5, 127.0.0.1",
+        "edge mode should append peer when the peer is a trusted proxy"
+    );
+}
+
+#[tokio::test]
+async fn forwarded_header_emitted_when_enabled() {
+    use quik::config::{ForwardedConfig, Mode};
+    let backend = Backend::spawn("a").await;
+    let proxy = common::spawn_proxy_with_forwarded(
+        ProxySpec {
+            pools: vec![common::Backends::http("p", vec![backend.addr])],
+            routes: vec![route("/", "p")],
+        },
+        Mode::Edge,
+        ForwardedConfig {
+            trusted_proxies: vec![],
+            emit: true,
+        },
+    )
+    .await;
+    let client = https_client_http1_only();
+
+    let resp = client
+        .get(url(proxy.addr, "/x"))
+        .header("forwarded", "for=1.2.3.4") // spoofed by an untrusted client
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let fwd = backend.calls()[0]
+        .headers
+        .get("forwarded")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    // Untrusted edge client → the spoofed element is dropped and replaced
+    // with a single element describing our observed peer.
+    assert!(
+        fwd.starts_with("for=127.0.0.1;host=\""),
+        "forwarded should be replaced for an untrusted peer, got {fwd}"
+    );
+    assert!(fwd.ends_with(";proto=https"), "got {fwd}");
+    assert!(
+        !fwd.contains("1.2.3.4"),
+        "spoofed value must not survive: {fwd}"
+    );
+}
+
+#[tokio::test]
+async fn forwarded_header_absent_by_default() {
+    let backend = Backend::spawn("a").await;
+    let proxy = spawn_proxy(ProxySpec {
+        pools: vec![common::Backends::http("p", vec![backend.addr])],
+        routes: vec![route("/", "p")],
+    })
+    .await;
+    let client = https_client_http1_only();
+
+    let _ = client
+        .get(url(proxy.addr, "/x"))
+        .send()
+        .await
+        .expect("send");
+
+    let h = &backend.calls()[0].headers;
+    // X-Forwarded-* is always on; RFC 7239 Forwarded is opt-in.
+    assert!(h.get("x-forwarded-for").is_some());
+    assert!(
+        h.get("forwarded").is_none(),
+        "Forwarded must not be emitted unless [forwarded].emit = true"
+    );
+}
+
+#[tokio::test]
 async fn x_forwarded_proto_and_host_are_set() {
     let backend = Backend::spawn("a").await;
     let proxy = spawn_proxy(ProxySpec {

@@ -17,7 +17,34 @@ mode = "edge"
 
 | Field  | Type     | Default | Notes                                                                 |
 |--------|----------|---------|-----------------------------------------------------------------------|
-| `mode` | `"edge"` \| `"host"` | `"edge"` | `edge`: replace inbound `X-Forwarded-For`. `host`: append to it. |
+| `mode` | `"edge"` \| `"host"` | `"edge"` | Default trust posture for inbound forwarding headers. `edge`: replace inbound `X-Forwarded-For` (treat it as spoofable). `host`: append to it (we sit behind a trusted LB). See `[forwarded]` to trust specific peers in `edge` mode. |
+
+## `[forwarded]`
+
+Controls how the proxy populates client-forwarding headers. Optional - when
+omitted, the mode-driven defaults apply: `X-Forwarded-For`, `X-Forwarded-Proto`
+and `X-Forwarded-Host` are always emitted, the inbound `X-Forwarded-For` chain
+is trusted only in `host` mode, and the RFC 7239 `Forwarded` header is not
+emitted.
+
+```toml
+[forwarded]
+trusted_proxies = ["10.0.0.0/8", "192.168.1.5"]
+emit            = true
+```
+
+| Field             | Type             | Default | Notes                                                                                                                                                                 |
+|-------------------|------------------|---------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `trusted_proxies` | array of strings | `[]`    | CIDR blocks (`10.0.0.0/8`) or bare IP literals (`192.168.1.5`, treated as `/32` or `/128`). In `edge` mode, a request whose immediate peer is inside one of these is handled like `host` mode for that request: the inbound `X-Forwarded-For` / `Forwarded` chain is appended to rather than replaced. No effect in `host` mode. A malformed entry fails boot. |
+| `emit`            | bool             | `false` | Also emit the RFC 7239 `Forwarded` header (`for=…;host=…;proto=https`) alongside `X-Forwarded-*`. IPv6 `for` nodes are bracketed and quoted per the RFC.                |
+
+The trust model, summarised:
+
+| Mode   | `trusted_proxies` match | Behaviour                                  |
+|--------|-------------------------|--------------------------------------------|
+| `edge` | no                      | Replace the inbound chain with the peer IP |
+| `edge` | yes                     | Append the peer IP to the inbound chain    |
+| `host` | (ignored)               | Append the peer IP to the inbound chain    |
 
 ## Environment variable expansion
 
