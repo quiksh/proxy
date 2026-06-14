@@ -1336,6 +1336,62 @@ async fn forwarded_header_absent_by_default() {
 }
 
 #[tokio::test]
+async fn forwarding_headers_parity_over_http2() {
+    // The forwarding-header logic runs on the inbound request before protocol
+    // details are erased, so it must behave identically whether the client
+    // spoke HTTP/1.1 or HTTP/2. The other forwarding tests use an h1-only
+    // client; this one drives the same edge-mode anti-spoofing + RFC 7239
+    // emission over an ALPN-negotiated h2 connection.
+    use quik::config::{ForwardedConfig, Mode};
+    let backend = Backend::spawn("a").await;
+    let proxy = common::spawn_proxy_with_forwarded(
+        ProxySpec {
+            pools: vec![common::Backends::http("p", vec![backend.addr])],
+            routes: vec![route("/", "p")],
+        },
+        Mode::Edge,
+        ForwardedConfig {
+            trusted_proxies: vec![],
+            emit: true,
+        },
+    )
+    .await;
+    let client = https_client(); // negotiates HTTP/2 via ALPN
+
+    let resp = client
+        .get(url(proxy.addr, "/x"))
+        .header("x-forwarded-for", "203.0.113.99") // spoofed
+        .header("forwarded", "for=1.2.3.4") // spoofed
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.version(),
+        reqwest::Version::HTTP_2,
+        "client should have negotiated h2"
+    );
+
+    let h = &backend.calls()[0].headers;
+    // Identical to the h1 edge-mode path: spoofed values replaced, not trusted.
+    assert_eq!(h.get("x-forwarded-for").unwrap(), "127.0.0.1");
+    assert_eq!(h.get("x-forwarded-proto").unwrap(), "https");
+    assert!(
+        h.get("x-forwarded-host").is_some(),
+        "x-forwarded-host should be derived from the h2 :authority"
+    );
+    let fwd = h.get("forwarded").unwrap().to_str().unwrap();
+    assert!(
+        fwd.starts_with("for=127.0.0.1;host=\""),
+        "forwarded should be replaced over h2 too, got {fwd}"
+    );
+    assert!(
+        !fwd.contains("1.2.3.4"),
+        "spoofed forwarded value must not survive over h2: {fwd}"
+    );
+}
+
+#[tokio::test]
 async fn x_forwarded_proto_and_host_are_set() {
     let backend = Backend::spawn("a").await;
     let proxy = spawn_proxy(ProxySpec {
