@@ -224,19 +224,19 @@ impl AuthValidator {
     }
 
     fn apply_injector(&self, headers: &mut HeaderMap, claims: &Claims) -> Result<(), AuthError> {
-        // Reserved-header check: clients must not set any of the names we
-        // inject. Loud rejection here makes spoofing attempts visible in
-        // metrics and logs rather than being silently overwritten.
-        for m in &self.inject_headers {
-            if headers.contains_key(&m.header) {
-                return Err(AuthError::SpoofedHeader(m.header.as_str().to_string()));
-            }
+        // SECURITY: clients must not set any header reserved for claim injection
+        // - a present one is a spoof attempt, rejected loudly (visible in
+        // metrics/logs) rather than silently overwritten. The match is by
+        // `HeaderName`, so it is case-insensitive (`X-Tenant-Id` == `x-tenant-id`);
+        // `first_reserved_present` and its test pin that invariant.
+        if let Some(h) = first_reserved_present(headers, &self.inject_headers) {
+            return Err(AuthError::SpoofedHeader(h.as_str().to_string()));
         }
         for m in &self.inject_headers {
             match claims.get(m.claim.as_str()) {
                 Some(v) => {
                     let Some(s) = claim_to_string(v) else {
-                        // Null claim — treat as missing.
+                        // Null claim - treat as missing.
                         if m.required {
                             return Err(AuthError::InvalidClaims(format!(
                                 "claim '{}' present but null (required)",
@@ -253,7 +253,7 @@ impl AuthValidator {
                             tracing::warn!(
                                 claim = %m.claim,
                                 header = %m.header,
-                                "claim contains characters invalid in HTTP header — dropping"
+                                "claim contains characters invalid in HTTP header - dropping"
                             );
                             if m.required {
                                 return Err(AuthError::InvalidClaims(format!(
@@ -276,6 +276,23 @@ impl AuthValidator {
         }
         Ok(())
     }
+}
+
+/// SECURITY: the first `inject_headers` name present on the inbound request, if
+/// any - a client setting a header reserved for claim injection is a spoof
+/// attempt (it would otherwise pose as a verified identity to the upstream). The
+/// lookup is case-insensitive because `HeaderMap::contains_key` compares by
+/// normalised `HeaderName` (`X-Tenant-Id` and `x-tenant-id` are the same key).
+/// The case-variant unit test pins this so a refactor to a raw string compare
+/// can't silently reintroduce a case bypass.
+fn first_reserved_present<'a>(
+    headers: &HeaderMap,
+    inject: &'a [CompiledMapping],
+) -> Option<&'a HeaderName> {
+    inject
+        .iter()
+        .map(|m| &m.header)
+        .find(|h| headers.contains_key(*h))
 }
 
 fn compile_mapping(m: &ClaimHeaderMapping) -> Result<CompiledMapping> {
@@ -470,7 +487,7 @@ fn build_jwks_client() -> ProxyClient {
 }
 
 /// Build a JWKS client that bypasses certificate verification. Only used by
-/// the test harness — production code should never call this.
+/// the test harness - production code should never call this.
 #[doc(hidden)]
 pub fn build_jwks_client_skip_verify() -> ProxyClient {
     use rustls::DigitallySignedStruct;
@@ -544,4 +561,65 @@ pub fn extract_bearer_token(headers: &http::HeaderMap) -> Option<&str> {
         return None;
     }
     Some(token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mapping(claim: &str, header: &str) -> CompiledMapping {
+        CompiledMapping {
+            claim: claim.to_string(),
+            header: header.parse().unwrap(),
+            required: false,
+        }
+    }
+
+    /// SECURITY: a reserved (injected) header must be detected on the inbound
+    /// request regardless of the case the client sends it in - header names are
+    /// case-insensitive, so a case-sensitive check would be a spoofing bypass.
+    #[test]
+    fn reserved_header_detection_is_case_insensitive() {
+        let inject = vec![
+            mapping("sub", "x-auth-sub"),
+            mapping("tenant_id", "x-tenant-id"),
+        ];
+
+        for name in [
+            "x-auth-sub",
+            "X-Auth-Sub",
+            "X-AUTH-SUB",
+            "x-AUTH-sub",
+            "X-auth-Sub",
+            "x-tenant-id",
+            "X-Tenant-Id",
+            "X-TENANT-ID",
+        ] {
+            let mut h = HeaderMap::new();
+            h.insert(
+                HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderValue::from_static("spoofed"),
+            );
+            assert!(
+                first_reserved_present(&h, &inject).is_some(),
+                "case variant {name:?} of a reserved header must be caught"
+            );
+        }
+
+        // A non-reserved header (any case) is not flagged.
+        for name in ["x-not-reserved", "X-Not-Reserved", "authorization"] {
+            let mut h = HeaderMap::new();
+            h.insert(
+                HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderValue::from_static("ok"),
+            );
+            assert!(
+                first_reserved_present(&h, &inject).is_none(),
+                "non-reserved header {name:?} must not be flagged"
+            );
+        }
+
+        // No inbound headers → nothing reserved present.
+        assert!(first_reserved_present(&HeaderMap::new(), &inject).is_none());
+    }
 }

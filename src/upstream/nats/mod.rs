@@ -2,8 +2,8 @@
 //!
 //! Each NATS-backed pool watches its `reg.<…>` subtree (members self-register
 //! there) plus the matching `override.<…>` subtree (operator drain/cordon
-//! intent, operator-wins) and reconciles them into the pool's live member list
-//! — reusing the same `write_lock` + `ArcSwap` swap, `build_member`, and
+//! intent, operator-wins) and reconciles them into the pool's live member list,
+//! reusing the same `write_lock` + `ArcSwap` swap, `build_member`, and
 //! `drain_member` the admin API uses. Only `Nats`-sourced members are ever
 //! touched; config/runtime members are left alone.
 //!
@@ -31,6 +31,21 @@ use crate::upstream::drain::drain_member;
 use crate::upstream::{MemberSource, Pool, Upstream, UpstreamPoolEntry, unix_now_ms};
 use reconcile::Registration;
 
+/// The watcher's running view of one pool's subtrees, threaded through the
+/// snapshot → event → reconcile path so they share one piece of state rather
+/// than passing three maps around (and re-created on each reconnect for a full
+/// re-snapshot).
+#[derive(Default)]
+struct WatchState {
+    /// `reg.*` key → parsed registration (the desired members).
+    desired: HashMap<String, Registration>,
+    /// Identity suffixes with a live `override.*` - the operator-wins suppress set.
+    held: HashSet<String>,
+    /// `reg.*` keys currently failing admission, so we audit only the transition
+    /// into rejection rather than every reconcile.
+    rejected: HashSet<String>,
+}
+
 /// Run the NATS watcher until drain begins. Spawned once at startup when a
 /// `[nats]` block is present; returns immediately (a no-op) if no pool is
 /// NATS-backed.
@@ -45,7 +60,7 @@ pub async fn run_watcher(pool: Arc<Pool>, nats: NatsConfig, shutdown: Coordinato
         return;
     }
 
-    // Connect with retry — never blocks boot (this runs in a spawned task) and
+    // Connect with retry - never blocks boot (this runs in a spawned task) and
     // never gives up until drain. The pools serve their static config until the
     // first successful snapshot.
     let client = tokio::select! {
@@ -81,9 +96,10 @@ async fn connect(nats: &NatsConfig) -> anyhow::Result<async_nats::Client> {
         }
     });
     if let Some(creds) = &nats.creds_file {
-        // The JWT in a .creds is presented to the server on connect; over a
-        // plaintext link it can be sniffed. Warn loudly rather than silently
-        // ship credentials in the clear.
+        // SECURITY (auth): the NATS credential is a file (never inline). The JWT
+        // in a .creds is presented to the server on connect; over a plaintext
+        // link it can be sniffed. Warn loudly rather than silently ship
+        // credentials in the clear - production must use tls://.
         if !nats
             .url
             .trim_start()
@@ -92,7 +108,7 @@ async fn connect(nats: &NatsConfig) -> anyhow::Result<async_nats::Client> {
         {
             tracing::warn!(
                 url = %nats.url,
-                "NATS credentials are configured over a non-TLS URL — the credential JWT is sent \
+                "NATS credentials are configured over a non-TLS URL - the credential JWT is sent \
                  in the clear; use tls:// in production"
             );
         }
@@ -137,6 +153,19 @@ async fn pool_loop(
     let reg_prefix = subject_prefix(&reg_sub);
     let override_sub = override_subject(&reg_sub);
     let override_prefix = override_sub.as_deref().map(subject_prefix);
+    // Parse the (static) allow-list once per pool, not per registration event.
+    let allow = reconcile::compile_allow(&cfg.allow_addresses);
+
+    // H2: with no caps, one compromised/buggy credential can register unbounded
+    // members. Caps default off (a tight cap fails unsafe), so nudge the operator
+    // to bound it - here or, better, with JetStream bucket limits (docs §10).
+    if cfg.max_members.is_none() && cfg.max_instances_per_service.is_none() {
+        tracing::warn!(
+            pool = %entry.name,
+            "NATS pool has no max_members / max_instances_per_service cap; registrations are \
+             unbounded - set JetStream bucket limits and/or caps to bound a runaway writer"
+        );
+    }
 
     loop {
         let store = match js.get_key_value(&nats.bucket).await {
@@ -152,17 +181,8 @@ async fn pool_loop(
 
         // Authoritative snapshot (handles the empty-bucket case that `watch`'s
         // seen_current marker does not), then a full reconcile.
-        let mut desired: HashMap<String, Registration> = HashMap::new();
-        let mut held: HashSet<String> = HashSet::new();
-        let mut rejected: HashSet<String> = HashSet::new();
-        if let Err(e) = snapshot(
-            &store,
-            &reg_prefix,
-            override_prefix.as_deref(),
-            &mut desired,
-            &mut held,
-        )
-        .await
+        let mut state = WatchState::default();
+        if let Err(e) = snapshot(&store, &reg_prefix, override_prefix.as_deref(), &mut state).await
         {
             tracing::warn!(pool = %entry.name, error = %e, "NATS snapshot failed; freezing");
             if sleep_or_drain(&nats, &shutdown).await {
@@ -170,7 +190,7 @@ async fn pool_loop(
             }
             continue;
         }
-        reconcile_full(&entry, &cfg, &desired, &held, &mut rejected).await;
+        reconcile_full(&entry, &cfg, &allow, &mut state).await;
 
         // Live deltas over both subtrees.
         let subjects: Vec<String> = std::iter::once(reg_sub.clone())
@@ -193,8 +213,8 @@ async fn pool_loop(
                 item = watch.next() => match item {
                     Some(Ok(kv)) => {
                         apply_event(
-                            &entry, &cfg, &reg_prefix, override_prefix.as_deref(),
-                            &mut desired, &mut held, &mut rejected, kv,
+                            &entry, &cfg, &allow, &reg_prefix, override_prefix.as_deref(),
+                            &mut state, kv,
                         ).await;
                     }
                     Some(Err(e)) => {
@@ -233,8 +253,7 @@ async fn snapshot(
     store: &Store,
     reg_prefix: &str,
     override_prefix: Option<&str>,
-    desired: &mut HashMap<String, Registration>,
-    held: &mut HashSet<String>,
+    state: &mut WatchState,
 ) -> anyhow::Result<()> {
     let mut keys = store.keys().await.context("listing KV keys")?;
     while let Some(key) = keys.next().await {
@@ -244,29 +263,29 @@ async fn snapshot(
                 && entry.operation == Operation::Put
                 && let Ok(reg) = reconcile::parse(&entry.value)
             {
-                desired.insert(key, reg);
+                state.desired.insert(key, reg);
             }
         } else if let Some(op) = override_prefix
             && key_in_subtree(&key, op)
             && let Some(entry) = store.entry(&key).await.context("reading KV entry")?
             && entry.operation == Operation::Put
         {
-            held.insert(reconcile::identity_suffix(&key).to_string());
+            state
+                .held
+                .insert(reconcile::identity_suffix(&key).to_string());
         }
     }
     Ok(())
 }
 
 /// Apply one live watch event, then re-run the full (idempotent) reconcile.
-#[allow(clippy::too_many_arguments)]
 async fn apply_event(
     entry: &Arc<UpstreamPoolEntry>,
     cfg: &UpstreamNatsConfig,
+    allow: &[reconcile::AllowEntry],
     reg_prefix: &str,
     override_prefix: Option<&str>,
-    desired: &mut HashMap<String, Registration>,
-    held: &mut HashSet<String>,
-    rejected: &mut HashSet<String>,
+    state: &mut WatchState,
     kv: async_nats::jetstream::kv::Entry,
 ) {
     let op = match kv.operation {
@@ -280,7 +299,7 @@ async fn apply_event(
         match kv.operation {
             Operation::Put => match reconcile::parse(&kv.value) {
                 Ok(reg) => {
-                    desired.insert(kv.key.clone(), reg);
+                    state.desired.insert(kv.key.clone(), reg);
                 }
                 Err(e) => {
                     tracing::warn!(pool = %entry.name, key = %kv.key, error = %e, "ignoring unparseable registration");
@@ -288,8 +307,8 @@ async fn apply_event(
                 }
             },
             Operation::Delete | Operation::Purge => {
-                desired.remove(&kv.key);
-                rejected.remove(&kv.key);
+                state.desired.remove(&kv.key);
+                state.rejected.remove(&kv.key);
             }
         }
     } else if let Some(op) = override_prefix
@@ -298,17 +317,17 @@ async fn apply_event(
         let suffix = reconcile::identity_suffix(&kv.key).to_string();
         match kv.operation {
             Operation::Put => {
-                held.insert(suffix);
+                state.held.insert(suffix);
             }
             Operation::Delete | Operation::Purge => {
-                held.remove(&suffix);
+                state.held.remove(&suffix);
             }
         }
     } else {
         return; // not our subtree
     }
 
-    reconcile_full(entry, cfg, desired, held, rejected).await;
+    reconcile_full(entry, cfg, allow, state).await;
 }
 
 /// Converge the pool's `Nats`-sourced members to the admitted subset of
@@ -316,25 +335,37 @@ async fn apply_event(
 async fn reconcile_full(
     entry: &Arc<UpstreamPoolEntry>,
     cfg: &UpstreamNatsConfig,
-    desired: &HashMap<String, Registration>,
-    held: &HashSet<String>,
-    rejected: &mut HashSet<String>,
+    allow: &[reconcile::AllowEntry],
+    state: &mut WatchState,
 ) {
-    // Gate every desired key through H1/H2 (deterministic order for stable cap
-    // accounting). `admit` only needs the set of already-accepted keys.
+    let WatchState {
+        desired,
+        held,
+        rejected,
+    } = state;
+    // SECURITY: this loop is the trust boundary for self-registration. Every
+    // `desired` entry is a self-asserted value an untrusted writer put in the
+    // bucket - its `address` is attacker-controlled. Nothing reaches the live
+    // member list (and thus receives proxied traffic + injected identity headers)
+    // without passing `reconcile::admit` (H1 allow-list + H2 caps) here first.
+    // Deterministic key order keeps cap accounting stable.
     let mut accepted: HashSet<String> = HashSet::new();
     let mut keys: Vec<&String> = desired.keys().collect();
     keys.sort();
     for k in keys {
         let reg = &desired[k];
+        // SECURITY (operator-wins): a live override.* suppresses this member and
+        // it can't be resurrected by a re-registration. A service credential
+        // cannot write override.* (NATS subject permissions enforce the
+        // reg.*/override.* split), so this precedence is structural, not advisory.
         if held.contains(reconcile::identity_suffix(k)) {
-            continue; // operator-wins: suppressed
+            continue;
         }
         match reconcile::admit(
             k,
             &reg.address,
             &accepted,
-            &cfg.allow_addresses,
+            allow,
             cfg.max_members,
             cfg.max_instances_per_service,
         ) {
@@ -446,11 +477,9 @@ async fn reconcile_full(
     let drain_timeout = Duration::from_millis(entry.drain_cfg.timeout_ms);
     for m in to_drain {
         let entry = entry.clone();
-        let addr = m.address.clone();
-        let name = entry.name.clone();
         metrics::counter!(
             "quik_nats_reconcile_total",
-            "pool" => name.clone(),
+            "pool" => entry.name.clone(),
             "action" => "remove",
         )
         .increment(1);
@@ -458,8 +487,8 @@ async fn reconcile_full(
             target: "quik::admin::audit",
             event = "nats_reconcile",
             action = "member_removed",
-            pool = %name,
-            member = %addr,
+            pool = %entry.name,
+            member = %m.address,
             result = "ok",
             "NATS member removed (draining)"
         );
@@ -486,7 +515,7 @@ fn override_subject(reg_subject: &str) -> Option<String> {
 }
 
 /// True if `key` falls under the literal `prefix` subtree (respecting token
-/// boundaries — `reg.shop.checkout` does not match `reg.shop.checkoutX.c1`).
+/// boundaries - `reg.shop.checkout` does not match `reg.shop.checkoutX.c1`).
 fn key_in_subtree(key: &str, prefix: &str) -> bool {
     key.strip_prefix(prefix)
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
