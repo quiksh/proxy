@@ -1,6 +1,6 @@
 //! Serializable response shapes for the admin API.
 //!
-//! Member responses are intentionally verbose — operators debugging at 3am
+//! Member responses are intentionally verbose - operators debugging at 3am
 //! want to see every contributing factor (lifecycle, passive, active) rather
 //! than a single collapsed `state` string. The trade-off is response size,
 //! which is fine for a low-volume admin endpoint.

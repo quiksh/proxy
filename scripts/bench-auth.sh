@@ -9,7 +9,7 @@
 #   5. Warms each route with three requests.
 #   6. Hammers each route with ab (keep-alive, configurable -n / -c).
 #   7. Scrapes /metrics and reports a verdict on whether the JWKS cache is
-#      doing its job — i.e. did we fetch the JWKS once, or N times?
+#      doing its job - i.e. did we fetch the JWKS once, or N times?
 #
 # Cleanup: the JWKS server is killed on exit. docker compose is left running.
 #
@@ -19,7 +19,7 @@
 #   REQUESTS=2000 CONCURRENCY=8 ./scripts/bench-auth.sh
 #
 # Prereqs: docker, ab (apache2-utils), curl, python3 with PyJWT + cryptography.
-# Assumes docker-compose.yml mounts config/auth-demo.toml — see README for the
+# Assumes docker-compose.yml mounts config/auth-demo.toml - see README for the
 # one-line sed to switch from docker.toml.
 
 set -euo pipefail
@@ -41,7 +41,7 @@ for cmd in docker ab curl python3; do
     fi
 done
 if ! python3 -c 'import jwt, cryptography' 2>/dev/null; then
-    echo "ERROR: python deps missing — install with: pip install PyJWT cryptography"
+    echo "ERROR: python deps missing - install with: pip install PyJWT cryptography"
     missing=1
 fi
 (( missing == 0 )) || exit 1
@@ -72,7 +72,7 @@ for _ in $(seq 1 20); do
     sleep 0.2
 done
 if ! curl -fs "http://127.0.0.1:$JWKS_PORT/jwks.json" >/dev/null 2>&1; then
-    echo "ERROR: JWKS server didn't come up — see $JWKS_LOG"; exit 1
+    echo "ERROR: JWKS server didn't come up - see $JWKS_LOG"; exit 1
 fi
 
 # ─── 3. Stack ────────────────────────────────────────────────────────────────
@@ -171,7 +171,7 @@ auth_requests_total=$(( REQUESTS * 2 ))   # /api/x + /internal/x
 for block in users services; do
     before=$(fetches_value "$JWKS_BEFORE" "$block" "ok")
     after=$(fetches_value "$JWKS_AFTER"  "$block" "ok")
-    # Integer math via shell — values are small integers.
+    # Integer math via shell - values are small integers.
     delta=$(( ${after%.*} - ${before%.*} ))
     total_delta=$(( total_delta + delta ))
     printf "  auth=%-10s  before: %4d   after: %4d   delta: %d\n" \

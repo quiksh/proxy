@@ -91,7 +91,7 @@ for port in "$proxy_port" "$admin_port"; do
         # lsof exits 1 when nothing is listening (which is what we want!).
         # Combined with `set -e -o pipefail` that would terminate the script,
         # so we explicitly tolerate the failure here. Note `|| true` inside
-        # the substitution, not outside — outside doesn't help with pipefail.
+        # the substitution, not outside - outside doesn't help with pipefail.
         holder=$(lsof -iTCP:"$port" -sTCP:LISTEN -P -n 2>/dev/null \
             | awk 'NR==2{print $1"("$2")"}' \
             || true)

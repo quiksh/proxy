@@ -1,4 +1,4 @@
-# Graceful shutdown — edge-withdraw before local drain
+# Graceful shutdown - edge-withdraw before local drain
 
 When quik runs behind a perimeter (a load balancer, Cloudflare, a service mesh),
 a plain drain races the perimeter's health check: quik stops accepting before the
@@ -9,7 +9,7 @@ grace** closes that gap.
 
 When quik drains on `SIGTERM`, a perimeter (e.g. Cloudflare) keeps routing to it
 until its own health check notices, so in-flight requests get cut. We want quik
-to stop *looking* healthy to the edge **before** it stops accepting locally —
+to stop *looking* healthy to the edge **before** it stops accepting locally -
 the standard Kubernetes preStop / fail-readiness-before-terminate pattern.
 
 ## Design
@@ -33,7 +33,7 @@ Implementation: a third `tokio::sync::watch` channel (`health_drain`) on
 (`src/admin/mod.rs`) reads `is_health_draining()` so it 503s across both the
 pre-drain and drain phases.
 
-`ShutdownConfig.pre_drain_grace_seconds` (`src/config.rs`) defaults to **0** —
+`ShutdownConfig.pre_drain_grace_seconds` (`src/config.rs`) defaults to **0** -
 zero collapses pre-drain and drain into the same instant, so behaviour is
 identical to a proxy with no edge in front. No external dependency: the only new
 wait is the bounded grace timer, and force-exit short-circuits it.
@@ -44,7 +44,7 @@ quik's existing surfaces, out of scope for quik core.
 
 ## Tests
 
-- Unit (`src/shutdown.rs`): the phase sequencer — pre-drain precedes drain;
+- Unit (`src/shutdown.rs`): the phase sequencer - pre-drain precedes drain;
   force during pre-drain cuts the grace; `pre_drain_grace_seconds = 0` collapses
   to immediate drain.
 - e2e (`tests/e2e_shutdown.rs`): after `begin_pre_drain`, `/healthz` is 503

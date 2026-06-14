@@ -1,11 +1,11 @@
-//! quik — a low-latency reverse proxy in Rust.
+//! quik - a low-latency reverse proxy in Rust.
 //!
 //! Module map (rough request flow on the reverse-proxy path):
 //! - [`tls`]: rustls acceptor for the inbound listener (ALPN: h2 + http/1.1).
 //! - [`proxy`]: per-connection handler. Spans, header rewriting, module
 //!   evaluation (auth, max_body_bytes, timeout, strip_prefix), upstream
 //!   selection, response forwarding.
-//! - [`routing`]: route table — exact > segment-prefix, longest-prefix-first.
+//! - [`routing`]: route table - exact > segment-prefix, longest-prefix-first.
 //! - [`upstream`]: per-pool client (TLS + ALPN scoped per-pool), `CountingBody`
 //!   byte counters, [`upstream::balance`] LB algorithms, passive health,
 //!   [`upstream::state`] (lifecycle + active health), [`upstream::probe`]
@@ -18,7 +18,7 @@
 //! - [`admin`]: separate listener for `/healthz`, `/metrics`, and the
 //!   `/admin/pools/*` registration API. Optional TLS + mTLS or bearer auth.
 //! - [`observability`]: tracing + metrics init; pre-built handles for hot paths.
-//! - [`egress`]: optional second listener — HTTP CONNECT forward proxy with
+//! - [`egress`]: optional second listener - HTTP CONNECT forward proxy with
 //!   host/CIDR policy, SNI sniffing, and optional proxy auth.
 //! - [`config`]: TOML schema + env-var expansion + validation.
 

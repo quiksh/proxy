@@ -1,6 +1,6 @@
 //! rustls acceptor for the inbound listener.
 //!
-//! ALPN advertises `h2` and `http/1.1` so a client can negotiate either —
+//! ALPN advertises `h2` and `http/1.1` so a client can negotiate either -
 //! the dispatch between them happens inside hyper-util's auto::Builder, not
 //! here. Client auth is intentionally disabled: this is an internet-facing
 //! ingress, and per-route auth (JWT) is the supported model.

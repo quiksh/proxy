@@ -3,7 +3,7 @@
 Default config is appropriate for a proxy behind a trusted load balancer or
 CDN, where most adversarial traffic never reaches quik. This page covers the
 knobs you'll want to think about before exposing a quik instance directly
-to the public internet, plus the things quik does **not** defend against —
+to the public internet, plus the things quik does **not** defend against -
 where the right answer is a CDN, a WAF, or kernel/network-layer controls
 upstream of the process.
 
@@ -15,27 +15,27 @@ and [`[upstreams.<pool>.pool]`](#upstream-connection-pool).
 quik is a small, single-binary HTTP reverse proxy. It can meaningfully
 defend against:
 
-- **Slow-client resource exhaustion** — slowloris and similar attacks that
+- **Slow-client resource exhaustion** - slowloris and similar attacks that
   open a connection and then dribble bytes to tie up server time.
-- **HTTP/2 abuse** — clients that open many concurrent streams,
+- **HTTP/2 abuse** - clients that open many concurrent streams,
   rapid-reset (CVE-2023-44487), or hold connections open without sending
   PING responses.
-- **Stalled WebSockets** — long-lived tunnels with no application
+- **Stalled WebSockets** - long-lived tunnels with no application
   keepalive, or tunnels that need to be cleared during a proxy restart.
-- **Upstream resource leakage** — idle pooled connections to backends
+- **Upstream resource leakage** - idle pooled connections to backends
   building up forever.
 
 quik **cannot** meaningfully defend against:
 
 - **Volumetric L3/L4 floods** (UDP amplification, SYN floods large enough
-  to saturate the link) — by the time traffic reaches the proxy, the pipe
+  to saturate the link) - by the time traffic reaches the proxy, the pipe
   is already saturated. This is what CDNs and anycast scrubbing networks
   buy.
-- **Application-layer business-logic abuse** — `POST /expensive-endpoint`
+- **Application-layer business-logic abuse** - `POST /expensive-endpoint`
   100 times. quik can rate-limit by IP (when rate limiting ships) but the
   authoritative quota lives in the application; see the rate-limiting
   scope discussion in [admin-api.md](admin-api.md).
-- **Body inspection / WAF rules** — quik does not parse or filter request
+- **Body inspection / WAF rules** - quik does not parse or filter request
   bodies beyond size limits. If you need pattern matching against payloads,
   put a dedicated WAF ([Coraza](https://coraza.io/), ModSecurity) in front.
 
@@ -62,8 +62,8 @@ listener slot indefinitely.
 
 | Deployment              | Recommended         |
 |-------------------------|---------------------|
-| Behind a CDN            | 30_000 (default) — CDN handles the abuse |
-| Direct to public        | 5_000–10_000        |
+| Behind a CDN            | 30_000 (default) - CDN handles the abuse |
+| Direct to public        | 5_000-10_000        |
 | LAN / homelab           | 30_000 or disable (`0`) |
 
 Disable with `0`. Doing so also removes a hyper-side defence that fires on
@@ -77,13 +77,13 @@ connections. If the peer doesn't respond within `timeout_ms`, the
 connection is dropped. Two reasons to enable:
 
 1. **NAT timeouts.** Long-lived gRPC / streaming connections behind a NAT
-   that times out idle flows after 60–90 seconds will silently break;
+   that times out idle flows after 60-90 seconds will silently break;
    PINGs keep the flow alive *and* detect when the peer has actually died.
 2. **Dead-peer detection.** A client that crashed without sending TCP FIN
    leaves a half-open connection that consumes a server slot until the
    kernel TCP keepalive (typically 2 hours) reaps it.
 
-Disabled by default (`interval_ms = 0`) — appropriate when long-lived h2
+Disabled by default (`interval_ms = 0`) - appropriate when long-lived h2
 isn't in your traffic profile. Enable with `interval_ms = 30_000` and
 `timeout_ms = 20_000` for gRPC-streaming workloads.
 
@@ -103,13 +103,13 @@ many concurrent requests over one connection is the actual workload.
 
 Limits the number of locally-reset streams the server tracks in memory
 (RFC 9113 §5.1.2). Default `64`. The 2023 "Rapid Reset" attack
-(CVE-2023-44487) opens a stream and immediately RSTs it — at high rates,
+(CVE-2023-44487) opens a stream and immediately RSTs it - at high rates,
 this can starve the server even though no stream is "active". Hyper
 caps this automatically; this knob makes the cap configurable for
 defenders who want to tighten it further.
 
 > **Note.** This option is currently parsed but not yet plumbed through
-> to hyper's builder — the underlying API stabilised after the rest of
+> to hyper's builder - the underlying API stabilised after the rest of
 > these landed. Tracked as a follow-up.
 
 ### `websocket_idle_timeout_ms`
@@ -120,14 +120,14 @@ either direction for the configured period.
 
 | Deployment                  | Recommended      |
 |-----------------------------|------------------|
-| Chat / control-plane WS     | 300_000 (default) — application sends pings|
-| Long-poll-style replacement | 600_000–900_000  |
-| Direct, no app-level pings  | 60_000–120_000   |
+| Chat / control-plane WS     | 300_000 (default) - application sends pings|
+| Long-poll-style replacement | 600_000-900_000  |
+| Direct, no app-level pings  | 60_000-120_000   |
 | Strict resource isolation   | 30_000           |
 
 Disable with `0`. Most WS application protocols (Socket.IO, GraphQL
-subscriptions, MQTT-over-WS) send their own pings on a 30–60 s cadence
-— the default 5 min idle is comfortably longer than any legitimate one.
+subscriptions, MQTT-over-WS) send their own pings on a 30-60 s cadence
+- the default 5 min idle is comfortably longer than any legitimate one.
 
 ## Upstream connection pool
 
@@ -146,7 +146,7 @@ hop. Defaults match the historical hardcoded values. Tighten on
 memory-constrained hosts; loosen for very hot pools that benefit from
 keeping more warm connections around.
 
-`idle_timeout_ms` is also a defence against subtle backend bugs — some
+`idle_timeout_ms` is also a defence against subtle backend bugs - some
 servers happily hold idle connections for hours but then 500 on the first
 request after that. Forcing the pool to recycle puts a ceiling on
 backend-bug staleness.
@@ -163,7 +163,7 @@ When the proxy receives `SIGTERM` (or first `SIGINT`):
    task races against the drain signal; when drain fires, the tunnel is
    dropped and the client sees a TCP FIN.
 
-This is intentional — long-lived WS connections established before the
+This is intentional - long-lived WS connections established before the
 rollover would otherwise pin the old proxy indefinitely. The expected
 client behaviour is "reconnect", which routes the new connection to the
 already-spun-up replacement proxy.
@@ -214,6 +214,6 @@ token_env = "QUIK_ADMIN_TOKEN"
 ```
 
 For the loopback bind on `[admin]`: even on a single-host deployment, the
-admin listener should not be public — it carries pool mutation endpoints
+admin listener should not be public - it carries pool mutation endpoints
 and metrics that reveal infrastructure shape. Bind to `127.0.0.1` and
 reach it via an SSH tunnel or a local control script.

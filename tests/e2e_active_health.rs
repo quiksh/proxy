@@ -1,4 +1,4 @@
-//! Active health checks — probe state transitions and the canonical
+//! Active health checks - probe state transitions and the canonical
 //! passive/active interaction.
 //!
 //! Probe interval is set to 100ms with `unhealthy_threshold=1`,
@@ -123,7 +123,7 @@ async fn member_becomes_unroutable_after_probe_fails() {
     let proxy = spawn_proxy(ProxySpec {
         pools: vec![
             Backends::http("pool-a", vec![backend.addr])
-                // Optimistic startup — member is routable immediately; we then flip
+                // Optimistic startup - member is routable immediately; we then flip
                 // the backend to 503 and observe the transition out.
                 .with_active_health(fast_active_health(InitialActiveState::Healthy)),
         ],
@@ -211,7 +211,7 @@ async fn passive_ejection_keeps_member_out_even_when_active_probes_pass() {
     let client = reqwest::Client::new();
     let id = backend.addr.to_string();
 
-    // Drive real traffic — RoundRobin will hit backend a few times, ejecting it.
+    // Drive real traffic - RoundRobin will hit backend a few times, ejecting it.
     let proxy_client = https_client();
     for _ in 0..6 {
         let _ = proxy_client
@@ -221,7 +221,7 @@ async fn passive_ejection_keeps_member_out_even_when_active_probes_pass() {
             .unwrap();
     }
 
-    // Backend should now be passively ejected — passive.ejected = true.
+    // Backend should now be passively ejected - passive.ejected = true.
     wait_for_state(&client, proxy.admin_addr, "pool-a", &id, |b| {
         b["passive"]["ejected"] == true
     })
@@ -276,7 +276,7 @@ async fn drain_pauses_active_probes() {
     .await;
     let count_before = backend.healthz_count();
 
-    // Drain (don't remove — we want to keep the member around to observe
+    // Drain (don't remove - we want to keep the member around to observe
     // that probes don't continue).
     client
         .post(admin_url(

@@ -1,10 +1,10 @@
-//! Drain task — wait for in-flight requests on a member to finish, then
+//! Drain task - wait for in-flight requests on a member to finish, then
 //! either mark the member drained (POST /drain) or remove it from the pool
 //! (DELETE /members/{id}).
 //!
 //! Polling at 200ms rather than a notify pattern: the timeout arm needs a
 //! timer anyway, and a polled inflight counter is operationally debuggable
-//! from logs/metrics — there's no hidden signal flying around. Cost is one
+//! from logs/metrics - there's no hidden signal flying around. Cost is one
 //! atomic load per active drain per 200ms, negligible.
 
 use std::sync::Arc;
@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use crate::upstream::{Upstream, UpstreamPoolEntry};
 
 /// Drive a single member's drain to completion. The member's lifecycle must
-/// already be `draining` (the caller — admin DELETE / drain handler —
+/// already be `draining` (the caller - admin DELETE / drain handler -
 /// transitions it before spawning this task). When inflight reaches zero or
 /// the configured timeout elapses, this:
 /// - marks the lifecycle `drained`
@@ -53,11 +53,11 @@ pub async fn drain_member(
             break;
         }
         // If undrain raced and put the member back to active, abort the
-        // drain — no removal, no metrics. Operator-initiated undrain wins.
+        // drain - no removal, no metrics. Operator-initiated undrain wins.
         if !member.lifecycle.is_draining() {
             tracing::info!(
                 pool = %pool.name, member = %member.name,
-                "drain task observed lifecycle != draining — aborting"
+                "drain task observed lifecycle != draining - aborting"
             );
             return;
         }
@@ -76,7 +76,7 @@ pub async fn drain_member(
         tracing::info!(
             pool = %pool.name, member = %member.name,
             state = state.as_str(),
-            "drain task observed late lifecycle change — aborting before mark_drained"
+            "drain task observed late lifecycle change - aborting before mark_drained"
         );
         return;
     }

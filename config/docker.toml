@@ -28,7 +28,7 @@ members = [
     { address = "${BACKEND_B_ADDR:-backend-b:8080}" },
 ]
 
-# Fast-path health probe — must NOT be swallowed by the prefix route below.
+# Fast-path health probe - must NOT be swallowed by the prefix route below.
 [[routes]]
 path_exact = "/healthz"
 upstream   = "echo"
@@ -40,7 +40,7 @@ strip_prefix = "/echo"
 timeout_ms   = 5000
 upstream     = "echo"
 
-# Catchall — no module decoration.
+# Catchall - no module decoration.
 [[routes]]
 path_prefix = "/"
 upstream    = "echo"

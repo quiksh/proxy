@@ -1,24 +1,24 @@
-# Admin API — online management
+# Admin API - online management
 
 The admin listener serves three things:
 
-- `/healthz` — liveness probe. 200 normally; 503 once drain begins.
-- `/metrics` — Prometheus exposition.
-- `/admin/pools/*` — manage upstream members on a running proxy.
+- `/healthz` - liveness probe. 200 normally; 503 once drain begins.
+- `/metrics` - Prometheus exposition.
+- `/admin/pools/*` - manage upstream members on a running proxy.
 
 This page is about the third one. The first two are described in
 [HA reverse proxy](ha-reverse-proxy.md#observability).
 
 ## Why it exists
 
-Restarting a proxy in front of live traffic is annoying — every TLS session
+Restarting a proxy in front of live traffic is annoying - every TLS session
 has to renegotiate, every long-lived connection drops, and any in-flight
 request gets aborted unless you orchestrate a careful drain. The admin API
 lets you do the things that historically motivated restarts (add a backend,
 remove a dead one, roll a deploy) without touching the process.
 
 Members added via the API live alongside the ones from the config file. On
-restart, only the file is read — so persistent fleet state still belongs in
+restart, only the file is read - so persistent fleet state still belongs in
 the config. The API is for live changes.
 
 ## Endpoints
@@ -32,14 +32,14 @@ the config. The API is for live changes.
 | POST   | `/admin/pools/{pool}/members/{id}/drain`             | Stop routing to a member, wait for in-flight.   |
 | POST   | `/admin/pools/{pool}/members/{id}/undrain`           | Cancel a drain; member becomes active again.    |
 | DELETE | `/admin/pools/{pool}/members/{id}`                   | Drain, then remove from the pool.               |
-| GET    | `/admin/config/snapshot`                             | Live upstream state as TOML — for promoting runtime changes back to the config file. |
+| GET    | `/admin/config/snapshot`                             | Live upstream state as TOML - for promoting runtime changes back to the config file. |
 
 Member `{id}` is the member's `address` (`host:port`), URL-encoded if
 needed.
 
 ## Config drift
 
-The config file is the source of truth — pools, routes, auth blocks, and
+The config file is the source of truth - pools, routes, auth blocks, and
 listeners only ever come from it. The admin API is for *tactical* live
 changes within that structure (add/drain/remove members in an existing
 pool). Anything you add via the API is lost on restart unless you also
@@ -62,7 +62,7 @@ curl -s http://127.0.0.1:9090/admin/config/snapshot
 ```toml
 # Live upstream snapshot.
 #
-# Pools, routes, auth blocks, and listeners are static at runtime —
+# Pools, routes, auth blocks, and listeners are static at runtime -
 # consult your original config file for those sections. The blocks
 # below reflect live state including any runtime-added members.
 #
@@ -80,7 +80,7 @@ members = [
 ]
 ```
 
-The output is scoped to `[[upstreams]]` blocks — nothing else can drift at
+The output is scoped to `[[upstreams]]` blocks - nothing else can drift at
 runtime. Diff against your config file, paste the `runtime` members across
 when you're ready to make them durable, and the next restart will pick
 them up.
@@ -101,23 +101,23 @@ A member is **routable** only when `lifecycle = active` and active health
 isn't currently marking it unhealthy. `draining` members don't receive new
 requests; in-flight ones finish (or are aborted on drain timeout).
 
-`DELETE` and `POST .../drain` do the same thing initially — they put the
+`DELETE` and `POST .../drain` do the same thing initially - they put the
 member in `draining`. The difference is what happens when drain completes:
 
 - `DELETE` removes the member from the pool entirely. Gone.
-- `POST .../drain` leaves it in `drained` — still in the pool, still
+- `POST .../drain` leaves it in `drained` - still in the pool, still
   inspectable, but not routable. Useful for "cordon" semantics.
 
 `POST .../undrain` only works on `draining` or `drained` members. It puts
 the lifecycle back to `active`.
 
 **Active health** (probe-controlled, only when configured): `initial →
-healthy ↔ unhealthy`. The admin API doesn't change this — only the probe
+healthy ↔ unhealthy`. The admin API doesn't change this - only the probe
 task does.
 
 ## Examples
 
-Open admin listener (default — no auth):
+Open admin listener (default - no auth):
 
 ```bash
 ADMIN=http://127.0.0.1:9090
@@ -161,7 +161,7 @@ Undrain (cancel):
 curl -s -X POST "$ADMIN/admin/pools/api/members/10.0.0.5:8080/undrain"
 ```
 
-Only succeeds on a `draining` or `drained` member — `409 Conflict` on an
+Only succeeds on a `draining` or `drained` member - `409 Conflict` on an
 already-active one. A member that's been `DELETE`d is gone and can't be
 undrained.
 
@@ -194,7 +194,7 @@ done
 echo "old backend drained"
 ```
 
-If you're cycling multiple backends, drain them one at a time — don't drain
+If you're cycling multiple backends, drain them one at a time - don't drain
 the whole pool simultaneously or every request hits "no upstream available".
 
 ## Authentication
@@ -217,7 +217,7 @@ boot loudly. Clients send `Authorization: Bearer <token>` on every
 mutating request.
 
 `read` and `write` are separate auth groups. The default leaves `read`
-open and asks you to set `write` — reads expose the same data as
+open and asks you to set `write` - reads expose the same data as
 `/metrics`, so the typical posture is to authenticate only mutations.
 
 ### mTLS
@@ -271,7 +271,7 @@ JSON body, `error` field carrying a human-readable message:
 | 400    | Malformed request body, invalid address, invalid scheme.               |
 | 401    | Missing or invalid `Authorization` (or no client cert under mTLS).     |
 | 404    | Unknown pool or member.                                                |
-| 409    | Conflict — member already exists on add, or undrain on active member.  |
+| 409    | Conflict - member already exists on add, or undrain on active member.  |
 | 503    | Pool has no eligible members (drain-all guard).                        |
 
 Example:
@@ -284,7 +284,7 @@ Example:
 
 - **No pool creation/deletion.** Pools come from the config file. The API
   manages members inside existing pools.
-- **No route editing.** Same reason — routes are in config.
+- **No route editing.** Same reason - routes are in config.
 - **No persistence.** Restart loses any API-only changes. Putting changes
   in your config file is the source of truth.
 - **No bulk operations.** Drain one member at a time so you can observe
@@ -292,7 +292,7 @@ Example:
 
 ## What to read next
 
-- [HA reverse proxy](ha-reverse-proxy.md) — the deployment patterns that
+- [HA reverse proxy](ha-reverse-proxy.md) - the deployment patterns that
   make this API useful.
-- [Config reference](config-reference.md) — `[admin]` and `[admin.auth.*]`
+- [Config reference](config-reference.md) - `[admin]` and `[admin.auth.*]`
   fields.
