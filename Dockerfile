@@ -20,13 +20,19 @@ RUN apt-get update \
 # Cache dependency compilation: build with a dummy source tree first, then
 # replace with the real source. Any change under src/ only invalidates the
 # quik crate, not its (slow-to-build) dependencies.
+# The root manifest declares `quik-register` as a workspace member, so cargo
+# must be able to load that member's manifest even when we only build the
+# `quik` binary. Copy its Cargo.toml and stub its source for the cache layer;
+# the real source is copied in below.
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir -p src benches examples tests \
+COPY quik-register/Cargo.toml ./quik-register/Cargo.toml
+RUN mkdir -p src benches examples tests quik-register/src \
  && echo 'fn main() {}' > src/main.rs \
  && : > src/lib.rs \
  && echo 'fn main() {}' > benches/hot_path.rs \
  && echo 'fn main() {}' > examples/echo_backend.rs \
  && echo 'fn main() {}' > examples/load_test.rs \
+ && echo 'fn main() {}' > quik-register/src/main.rs \
  && cargo build --release --bin quik --example echo_backend 2>/dev/null || true
 
 COPY src ./src
@@ -34,9 +40,10 @@ COPY benches ./benches
 COPY examples ./examples
 COPY tests ./tests
 COPY config ./config
+COPY quik-register ./quik-register
 
 # Ensure cargo notices the real source replaced the dummy.
-RUN find src benches examples tests -name '*.rs' -exec touch {} + \
+RUN find src benches examples tests quik-register -name '*.rs' -exec touch {} + \
  && cargo build --release --bin quik --example echo_backend
 
 # ─── Runtime: quik proxy ─────────────────────────────────────────────────────
