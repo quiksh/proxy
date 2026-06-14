@@ -1,0 +1,4 @@
+# Demo creds are generated on first `docker compose up` (the creds-init step),
+# never committed - they would be worthless secrets in a public repo anyway.
+*.creds
+server.conf

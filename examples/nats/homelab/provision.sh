@@ -6,7 +6,9 @@
 #   ./provision.sh checkout-3
 #
 # Requires the homelab stack to be up (docker compose ... up -d) so the
-# `quik-nats` network and the `quik-echo:demo` image exist.
+# `quik-nats` network and the `quik-echo:demo` image exist. Targets the
+# authenticated default stack - mounts the `register` project-key creds. For the
+# no-auth stack, drop the creds mount and use ../quik-register.toml.
 set -eu
 
 INSTANCE="${1:?usage: provision.sh <instance>   e.g. checkout-3}"
@@ -21,10 +23,11 @@ docker run -d --rm --name "$INSTANCE" \
   -e BIND_ADDR=0.0.0.0:8080 -e BACKEND_NAME="$INSTANCE" \
   "$IMAGE" >/dev/null
 
-# 2. Run the quik-register agent for it: health-gated registration + heartbeat,
+# 2. Run the quik-register agent for it: liveness-gated registration + heartbeat,
 #    graceful deregister on stop. (Uses the image built by docker compose.)
 docker run -d --rm --name "$INSTANCE-reg" --network "$NET" \
-  -v "$HERE/../quik-register.toml:/etc/quik-register/quik-register.toml:ro" \
+  -v "$HERE/auth/quik-register.toml:/etc/quik-register/quik-register.toml:ro" \
+  -v "$HERE/auth/register.creds:/etc/quik-register/nats.creds:ro" \
   -e INSTANCE="$INSTANCE" -e ADDR="$INSTANCE.svc:8080" \
   quik-register:demo >/dev/null
 
