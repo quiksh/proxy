@@ -5,8 +5,8 @@
 #   ../../../scripts/gen-dev-cert.sh
 #   docker compose -f examples/nats/ha/docker-compose.yml up -d --build
 #
-# Try: `docker compose ... stop nats-1` — the cluster keeps serving, both quik
-# stay converged (R3 bucket). Stop a backend — it drains out of both quik.
+# Try: `docker compose ... stop nats-1` - the cluster keeps serving, both quik
+# stay converged (R3 bucket). Stop a backend - it drains out of both quik.
 name: quik-nats-ha
 
 x-nats: &nats
@@ -21,7 +21,7 @@ x-backend: &backend
 
 x-registrar: &registrar
   image: quik-register:demo
-  build: { context: ../../.., dockerfile: examples/nats/Dockerfile.register }
+  build: { context: ../../.., dockerfile: quik-register/Dockerfile }
   volumes: ["../quik-register.toml:/etc/quik-register/quik-register.toml:ro"]
 
 services:

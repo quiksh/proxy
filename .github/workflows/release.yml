@@ -71,6 +71,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # The proxy image: ghcr.io/quiksh/proxy
       - id: meta
         uses: docker/metadata-action@v5
         with:
@@ -88,6 +89,31 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=quik
+          cache-to: type=gha,mode=max,scope=quik
+          platforms: linux/amd64
+
+      # The service-registration sidecar: ghcr.io/quiksh/quik-register. Cut from
+      # the same tag so the sidecar and proxy version in lockstep (they share the
+      # KV registration contract). repository_owner, not repository - GHCR images
+      # are owner-scoped, so this is ghcr.io/quiksh/quik-register, not …/proxy/….
+      - id: meta-register
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/quik-register
+          tags: |
+            type=raw,value=${{ steps.version.outputs.semver }}
+            type=raw,value=${{ steps.version.outputs.minor }}
+            type=raw,value=${{ steps.version.outputs.major }}
+            type=raw,value=latest
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: quik-register/Dockerfile
+          push: true
+          tags: ${{ steps.meta-register.outputs.tags }}
+          labels: ${{ steps.meta-register.outputs.labels }}
+          cache-from: type=gha,scope=quik-register
+          cache-to: type=gha,mode=max,scope=quik-register
           platforms: linux/amd64
