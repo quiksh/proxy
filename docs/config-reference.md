@@ -437,9 +437,9 @@ max_instances_per_service  = 50
 | Field                       | Default | Notes                                                            |
 |-----------------------------|---------|------------------------------------------------------------------|
 | `subject`                   | -       | Required. KV subject subtree feeding this pool, e.g. `reg.shop.checkout.>`. Must end with a wildcard (`>`/`*`) **and** have a literal prefix before it (a bare `>` is rejected - it matches nothing). |
-| `allow_addresses`           | -       | **Required, non-empty** (H1). CIDR (`10.0.0.0/8`), bare IP, or host-suffix (`.svc.local`). A self-asserted address outside this set is rejected. Fails *safe*. **Prefer CIDRs** - a host-suffix admits a hostname and trusts DNS to resolve it (see the design doc's DNS-trust residual). |
-| `max_members`               | none    | Backstop cap on total pool members (H2). Size **well above** the real fleet - a tight cap fails *unsafe* (locks out scale-up). |
-| `max_instances_per_service` | none    | Cap per `reg.<ns>.<service>.*` (H2, the surgical control). |
+| `allow_addresses`           | -       | **Required, non-empty.** CIDR (`10.0.0.0/8`), bare IP, or host-suffix (`.svc.local`). A self-asserted address outside this set is rejected. Fails *safe*. **Prefer CIDRs** - a host-suffix admits a hostname and trusts DNS to resolve it (see the design doc's DNS-trust residual). |
+| `max_members`               | none    | Backstop cap on total pool members. Size **well above** the real fleet - a tight cap fails *unsafe* (locks out scale-up). |
+| `max_instances_per_service` | none    | Cap per `reg.<ns>.<service>.*` (the surgical control). |
 
 The operator-override subtree (`override.<…>`, derived from `subject`) is watched
 automatically: an `override` key drains/suppresses the matching member

@@ -80,7 +80,7 @@ async fn in_flight_request_completes_after_drain() {
 
 #[tokio::test]
 async fn pre_drain_withdraws_health_before_listener_stops() {
-    // M7 Part B: the edge-withdraw ordering. When the pre-drain phase begins,
+    // Edge-withdraw ordering. When the pre-drain phase begins,
     // /healthz must flip to 503 *while the proxy keeps accepting* — so a
     // perimeter health check withdraws traffic before in-flight is cut. Only
     // when the actual drain begins should the listener stop accepting.

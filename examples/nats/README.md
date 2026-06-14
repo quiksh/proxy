@@ -48,7 +48,7 @@ docker compose -f examples/nats/homelab/docker-compose.yml stop checkout-1
 curl -s localhost:9090/metrics | grep -E 'quik_nats_|quik_pool_member_'
 ```
 
-## Addresses & the allow-list (H1)
+## Addresses & the allow-list
 
 The pool's `allow_addresses` gates which addresses a registration may claim — a
 self-asserted address outside it is rejected (and counted on

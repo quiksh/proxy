@@ -65,25 +65,25 @@ fn default_nats_reconnect_secs() -> u64 {
 
 /// Per-pool NATS registration binding. A pool carrying this block is populated
 /// from the KV subtree `subject`; backends self-register there. The hardening
-/// controls live here: the registrable-address allow-list (H1) and the member
-/// caps (H2).
+/// controls live here: the registrable-address allow-list and the member
+/// caps.
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpstreamNatsConfig {
     /// KV key subject filter feeding this pool, e.g. `reg.shop.checkout.>`.
     pub subject: String,
-    /// Registrable-address allow-list (H1): CIDR (`10.0.0.0/8`) or host-suffix
+    /// Registrable-address allow-list: CIDR (`10.0.0.0/8`) or host-suffix
     /// (`.svc.cluster.local`) entries. A self-asserted address outside this set
     /// is rejected. Required (and non-empty) - a pool admitting self-registered
     /// members must state where they may live; this fails *safe*.
     #[serde(default)]
     pub allow_addresses: Vec<String>,
-    /// Generous backstop cap on total members in this pool (H2). `None` ⇒ no
+    /// Generous backstop cap on total members in this pool. `None` ⇒ no
     /// cap. Size it well above the real fleet - a tight cap fails *unsafe*
     /// (it locks out legitimate new capacity). Pair with short TTLs + alerting.
     #[serde(default)]
     pub max_members: Option<u32>,
     /// Cap on instances per service subtree, i.e. per `reg.<ns>.<service>.*`
-    /// (H2 - the surgical anti-abuse control). `None` ⇒ no cap.
+    /// (the surgical anti-abuse control). `None` ⇒ no cap.
     #[serde(default)]
     pub max_instances_per_service: Option<u32>,
 }
@@ -944,7 +944,7 @@ fn validate(cfg: &Config) -> Result<()> {
                     u.name
                 );
             }
-            // SECURITY (H1, fail-safe): an empty allow-list would admit any
+            // HARDENING (allow-list, fail-safe): an empty allow-list would admit any
             // self-asserted address (SSRF / traffic hijack), so it is rejected at
             // config load - a NATS pool must state where members may live. Too
             // strict merely refuses a registration; too loose is a vulnerability.

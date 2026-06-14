@@ -140,7 +140,7 @@ curl -s localhost:9090/metrics | grep -E 'quik_nats_|quik_pool_member_'
 # quik_nats_registration_rejected_total{reason}, quik_pool_member_added/removed_total
 ```
 
-Try an out-of-policy registration to see H1 reject it (loopback is outside the
+Try an out-of-policy registration to see the allow-list reject it (loopback is outside the
 `.svc` allow-list, so this is refused and counted):
 
 ```sh

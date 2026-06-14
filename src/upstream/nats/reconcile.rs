@@ -4,13 +4,13 @@
 //! bucket is a control plane for traffic routing and every registration value
 //! (`address` especially) is **self-asserted by whoever holds a write
 //! credential** - treat it as attacker-controlled. The defences live here:
-//! - H1 - [`address_allowed`] / [`connect_host`]: the registrable-address
+//! - Allow-list - [`address_allowed`] / [`connect_host`]: the registrable-address
 //!   allow-list, parsed with the *same* parser quik connects through so the host
 //!   validated is the host dialled (no SSRF via parser differential).
-//! - H2 - [`admit`]: per-pool / per-service member caps.
+//! - Member caps - [`admit`]: per-pool / per-service member caps.
 //!
 //! No async-nats types appear here, so all of this is unit-tested without a
-//! server. See `docs/service-registration.md` §Security (H1/H2).
+//! server. See `docs/service-registration.md` §Security.
 
 use std::collections::HashSet;
 use std::net::IpAddr;
@@ -54,11 +54,11 @@ pub fn identity_suffix(key: &str) -> &str {
 /// reason label and the audit outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reject {
-    /// Address outside the pool's allow-list (H1).
+    /// Address outside the pool's allow-list.
     Address,
-    /// Pool member cap reached (H2 backstop).
+    /// Pool member cap reached (backstop).
     PoolCap,
-    /// Per-service instance quota reached (H2).
+    /// Per-service instance quota reached.
     ServiceQuota,
 }
 
@@ -103,10 +103,10 @@ pub fn compile_allow(allow: &[String]) -> Vec<AllowEntry> {
         .collect()
 }
 
-/// SECURITY: the H1/H2 admission gate. Decide whether a `reg` key carrying a
+/// SECURITY: the admission gate (allow-list + member caps). Decide whether a `reg` key carrying a
 /// self-asserted `addr` may be admitted, given the keys already accepted this
 /// pass (the watcher's authoritative view of `Nats`-sourced members), the
-/// allow-list (H1), and the caps (H2). Address is checked before any slot is
+/// allow-list, and the caps. Address is checked before any slot is
 /// counted; re-registration of an already-accepted key never consumes a fresh
 /// slot. Pure, so the gate is exhaustively unit-tested.
 pub fn admit(

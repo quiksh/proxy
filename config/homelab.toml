@@ -69,7 +69,7 @@ hosts       = ["proxmox.internal"]
 path_prefix = "/"
 upstream    = "proxmox"
 # Proxmox uses WebSockets for the noVNC / xterm.js consoles; quik forwards
-# Upgrade requests transparently so this Just Works (M2). No extra config.
+# Upgrade requests transparently so this Just Works. No extra config.
 
 [[routes]]
 hosts       = ["plex.internal"]

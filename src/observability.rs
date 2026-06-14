@@ -182,7 +182,7 @@ pub fn init_metrics() -> Result<PrometheusHandle> {
     );
     metrics::describe_counter!(
         "quik_nats_registration_rejected_total",
-        "Registrations refused by reason: address_not_allowed (H1) | pool_member_cap | service_quota (H2)"
+        "Registrations refused by reason: address_not_allowed | pool_member_cap | service_quota"
     );
 
     Ok(handle)

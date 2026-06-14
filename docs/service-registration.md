@@ -342,7 +342,7 @@ routing**: write access to it is traffic-steering power, and the `address` field
 in each value is **self-asserted** by whoever holds a write credential. The
 following are *requirements*, implemented in the watcher, not optional extras.
 
-### H1 - registrable-address allow-list (implemented, mandatory)
+### Registrable-address allow-list (implemented, mandatory)
 A self-asserted address outside the pool's `allow_addresses` (CIDR or
 host-suffix) is **rejected** before a member is built (`reconcile::admit` →
 `address_allowed`). Without this, a compromised service credential could point a
@@ -353,21 +353,21 @@ a malicious member in an authenticated pool would receive trusted traffic.
 empty list): a pool that admits self-registered members must state where they may
 live. This control **fails safe** - too strict merely rejects a registration.
 
-### H2 - member caps, fail-loud (implemented)
+### Member caps, fail-loud (implemented)
 - `max_instances_per_service` (per `reg.<ns>.<service>.*`) is the surgical
   control: it bounds a single runaway/compromised credential.
 - `max_members` (per pool) is a generous backstop.
 - Both are **off by default** and must be sized *well above* the real fleet,
   because a member cap **fails unsafe** - set near real capacity it locks out
   legitimate new hosts during a scale-up (the classic "the safety limit caused
-  the outage"). This is the opposite default posture to H1's allow-list.
+  the outage"). This is the opposite default posture to the allow-list.
 - Rejections are **loud, never silent**: `quik_nats_registration_rejected_total
   {reason}` plus an audit line on the transition into rejection. Alert on the
   rejection rate so a cap that starts biting is visible before it hurts.
 - The primary anti-abuse work is `max_instances_per_service` + JetStream
   account/bucket limits (set on the NATS side); the pool cap is defence in depth.
 
-### H3 - credentials & least privilege
+### Credentials & least privilege
 - quik connects over TLS with nkey/JWT creds from a file (never inline).
 - A service's credential may publish **only** its own `reg.<ns>.<service>.*`
   subtree; it can never write `override.>`. This subject-permission split (§4) is

@@ -13,7 +13,7 @@ key_path  = "./tls/key.pem"
 [admin]
 bind = "127.0.0.1:9090"
 
-# ─── Admin auth (M6) ────────────────────────────────────────────────────────
+# ─── Admin auth ────────────────────────────────────────────────────────
 # Per-endpoint-group auth. Both default to `none` for backwards compatibility,
 # but `write` should be set in production. When any group uses `mtls`, the
 # entire admin listener becomes TLS — read clients with `mode = "none"` still
@@ -47,7 +47,7 @@ bind = "127.0.0.1:9090"
 
 [shutdown]
 drain_grace_seconds = 30
-# Edge-withdraw grace (M7). On SIGTERM, /healthz flips to 503 immediately but
+# Edge-withdraw grace. On SIGTERM, /healthz flips to 503 immediately but
 # the proxy keeps accepting for this long *before* the drain begins — giving a
 # perimeter (e.g. Cloudflare) time to notice the 503 and stop routing, so
 # in-flight requests aren't cut. Default 0 (disabled). A drain-aware edge
@@ -76,7 +76,7 @@ ejection_threshold = 5     # consecutive failures before ejection
 ejection_base_ms   = 1000  # initial backoff window
 ejection_max_ms    = 60000 # exponential cap
 
-# Active health checks (M6). Default: disabled. When enabled, a single probe
+# Active health checks. Default: disabled. When enabled, a single probe
 # task per pool sends HTTP requests at `interval_ms` to each member's `path`.
 # Probe traffic does NOT count toward `quik_upstream_bytes_*` or
 # `quik_requests_total` — it lives entirely under `quik_active_health_check_*`.
@@ -96,7 +96,7 @@ unhealthy_threshold  = 3
 expected_status      = 200          # or "200-299" for a range
 initial_state        = "unhealthy"
 
-# Drain timeout for member removal via the admin API (M6). When `DELETE
+# Drain timeout for member removal via the admin API. When `DELETE
 # /admin/pools/{pool}/members/{id}` is called, the member transitions to
 # `draining`; the drain task waits up to this many ms for in-flight requests
 # to complete before forcibly removing it.

@@ -12,7 +12,7 @@
 //!   membership; on reconnect the bucket is re-snapshotted (`keys()`), so
 //!   expiries missed while disconnected are caught. NATS down at boot → the
 //!   pool serves its static config and the watcher keeps retrying.
-//! - **H1 allow-list / H2 caps:** every admission passes [`reconcile::admit`]
+//! - **Allow-list + member caps:** every admission passes [`reconcile::admit`]
 //!   before a member is built; rejections are counted and audited.
 
 pub mod reconcile;
@@ -156,7 +156,7 @@ async fn pool_loop(
     // Parse the (static) allow-list once per pool, not per registration event.
     let allow = reconcile::compile_allow(&cfg.allow_addresses);
 
-    // H2: with no caps, one compromised/buggy credential can register unbounded
+    // HARDENING (member caps): with no caps, one compromised/buggy credential can register unbounded
     // members. Caps default off (a tight cap fails unsafe), so nudge the operator
     // to bound it - here or, better, with JetStream bucket limits (docs §10).
     if cfg.max_members.is_none() && cfg.max_instances_per_service.is_none() {
@@ -347,7 +347,7 @@ async fn reconcile_full(
     // `desired` entry is a self-asserted value an untrusted writer put in the
     // bucket - its `address` is attacker-controlled. Nothing reaches the live
     // member list (and thus receives proxied traffic + injected identity headers)
-    // without passing `reconcile::admit` (H1 allow-list + H2 caps) here first.
+    // without passing `reconcile::admit` (allow-list + member caps) here first.
     // Deterministic key order keeps cap accounting stable.
     let mut accepted: HashSet<String> = HashSet::new();
     let mut keys: Vec<&String> = desired.keys().collect();
