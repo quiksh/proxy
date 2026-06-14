@@ -3,11 +3,13 @@ name: Release
 # Manually triggered from the Actions tab. In one run it:
 #   1. reads the latest vX.Y.Z tag and bumps the part you pick,
 #   2. creates and pushes the new tag,
-#   3. builds the quik image and publishes it to GHCR.
+#   3. builds the quik + quik-register images for linux/amd64 and linux/arm64
+#      on native runners and publishes multi-arch manifests to GHCR.
 #
-# Tag + build live in one job on purpose: a tag pushed with the default
-# GITHUB_TOKEN does not trigger a separate `on: push: tags` workflow, so
-# splitting them would need a PAT. This avoids that.
+# Multi-arch is done the "distribute across runners" way: each arch builds
+# natively (no QEMU - quik compiles Rust + BoringSSL, which is painfully slow
+# emulated), pushes by digest, then a final job stitches the per-arch digests
+# into one manifest list per image.
 on:
   workflow_dispatch:
     inputs:
@@ -21,10 +23,23 @@ permissions:
   contents: write # create and push tags
   packages: write # push to ghcr.io
 
+env:
+  PROXY_IMAGE: ghcr.io/${{ github.repository }}
+  REGISTER_IMAGE: ghcr.io/${{ github.repository_owner }}/quik-register
+
 jobs:
-  release:
-    name: tag and publish
+  # ── Compute + push the tag exactly once ────────────────────────────────────
+  # Tag push lives here rather than in a separate `on: push: tags` workflow: a
+  # tag pushed with the default GITHUB_TOKEN does not trigger one, so keeping it
+  # in this run avoids needing a PAT. The build jobs check out the same commit
+  # the tag points at (the dispatch ref's HEAD).
+  version:
+    name: compute version and tag
     runs-on: ubuntu-latest
+    outputs:
+      semver: ${{ steps.version.outputs.semver }}
+      minor: ${{ steps.version.outputs.minor }}
+      major: ${{ steps.version.outputs.major }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -55,12 +70,30 @@ jobs:
 
       - name: Create and push tag
         env:
-          TAG: ${{ steps.version.outputs.tag }}
+          TAG: v${{ steps.version.outputs.semver }}
         run: |
           set -euo pipefail
           git tag "$TAG"
           git push origin "$TAG"
           echo "### Released \`${TAG}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Build each arch natively, push by digest ───────────────────────────────
+  build:
+    name: build ${{ matrix.arch }}
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
 
       - uses: docker/setup-buildx-action@v3
 
@@ -72,26 +105,21 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # The proxy image: ghcr.io/quiksh/proxy
-      - id: meta
+      - id: meta-proxy
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=raw,value=${{ steps.version.outputs.semver }}
-            type=raw,value=${{ steps.version.outputs.minor }}
-            type=raw,value=${{ steps.version.outputs.major }}
-            type=raw,value=latest
+          images: ${{ env.PROXY_IMAGE }}
 
-      - uses: docker/build-push-action@v6
+      - id: build-proxy
+        uses: docker/build-push-action@v6
         with:
           context: .
           target: quik-runtime
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=quik
-          cache-to: type=gha,mode=max,scope=quik
-          platforms: linux/amd64
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta-proxy.outputs.labels }}
+          outputs: type=image,name=${{ env.PROXY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=quik-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=quik-${{ matrix.arch }}
 
       # The service-registration sidecar: ghcr.io/quiksh/quik-register. Cut from
       # the same tag so the sidecar and proxy version in lockstep (they share the
@@ -100,20 +128,106 @@ jobs:
       - id: meta-register
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/quik-register
-          tags: |
-            type=raw,value=${{ steps.version.outputs.semver }}
-            type=raw,value=${{ steps.version.outputs.minor }}
-            type=raw,value=${{ steps.version.outputs.major }}
-            type=raw,value=latest
+          images: ${{ env.REGISTER_IMAGE }}
 
-      - uses: docker/build-push-action@v6
+      - id: build-register
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: quik-register/Dockerfile
-          push: true
-          tags: ${{ steps.meta-register.outputs.tags }}
+          platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta-register.outputs.labels }}
-          cache-from: type=gha,scope=quik-register
-          cache-to: type=gha,mode=max,scope=quik-register
-          platforms: linux/amd64
+          outputs: type=image,name=${{ env.REGISTER_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=quik-register-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=quik-register-${{ matrix.arch }}
+
+      # Record each arch's pushed digest so the merge job can assemble the
+      # manifest list. One subdir per image; the digest (sans algo prefix) is
+      # the filename.
+      - name: Export digests
+        env:
+          PROXY_DIGEST: ${{ steps.build-proxy.outputs.digest }}
+          REGISTER_DIGEST: ${{ steps.build-register.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/digests/proxy /tmp/digests/quik-register
+          touch "/tmp/digests/proxy/${PROXY_DIGEST#sha256:}"
+          touch "/tmp/digests/quik-register/${REGISTER_DIGEST#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ── Stitch per-arch digests into one manifest list per image ───────────────
+  merge:
+    name: publish multi-arch manifests
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta-proxy
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.PROXY_IMAGE }}
+          tags: |
+            type=raw,value=${{ needs.version.outputs.semver }}
+            type=raw,value=${{ needs.version.outputs.minor }}
+            type=raw,value=${{ needs.version.outputs.major }}
+            type=raw,value=latest
+
+      - name: Create proxy manifest list
+        working-directory: /tmp/digests/proxy
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2046  # word-splitting is intentional: jq emits
+          # the -t flags, printf emits one image@digest arg per pushed arch.
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< '${{ steps.meta-proxy.outputs.json }}') \
+            $(printf '${{ env.PROXY_IMAGE }}@sha256:%s ' *)
+
+      - id: meta-register
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTER_IMAGE }}
+          tags: |
+            type=raw,value=${{ needs.version.outputs.semver }}
+            type=raw,value=${{ needs.version.outputs.minor }}
+            type=raw,value=${{ needs.version.outputs.major }}
+            type=raw,value=latest
+
+      - name: Create quik-register manifest list
+        working-directory: /tmp/digests/quik-register
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2046  # word-splitting is intentional (see above).
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< '${{ steps.meta-register.outputs.json }}') \
+            $(printf '${{ env.REGISTER_IMAGE }}@sha256:%s ' *)
+
+      - name: Inspect published manifests
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect '${{ env.PROXY_IMAGE }}:${{ needs.version.outputs.semver }}'
+          docker buildx imagetools inspect '${{ env.REGISTER_IMAGE }}:${{ needs.version.outputs.semver }}'
+          {
+            echo "### Published multi-arch (amd64, arm64)"
+            echo "- \`${PROXY_IMAGE}:${{ needs.version.outputs.semver }}\`"
+            echo "- \`${REGISTER_IMAGE}:${{ needs.version.outputs.semver }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
