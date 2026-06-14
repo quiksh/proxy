@@ -9,7 +9,7 @@
 //!   Set by the per-pool probe task; never set by real traffic.
 //!
 //! Routing eligibility (computed at pick time by the Balancer) is the AND
-//! of all three axes — see [`super::Upstream::is_routable`].
+//! of all three axes - see [`super::Upstream::is_routable`].
 
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 
@@ -97,7 +97,7 @@ impl MemberLifecycle {
         }
     }
 
-    /// Transition `draining → drained`. Terminal — no further state changes
+    /// Transition `draining → drained`. Terminal - no further state changes
     /// allowed. Errors if not currently draining.
     pub fn mark_drained(&self) -> Result<(), LifecycleState> {
         match self.state.compare_exchange(
@@ -175,7 +175,7 @@ impl ActiveHealthState {
 }
 
 /// Active health state for one member. When `enabled = false`, the member is
-/// always eligible — used for pools that haven't opted into active checks so
+/// always eligible - used for pools that haven't opted into active checks so
 /// existing behaviour is unchanged.
 pub struct ActiveHealth {
     pub enabled: bool,
@@ -189,7 +189,7 @@ pub struct ActiveHealth {
 
 impl ActiveHealth {
     /// Construct an always-eligible disabled instance. Used for pools without
-    /// active checks configured — `is_eligible` returns true unconditionally.
+    /// active checks configured - `is_eligible` returns true unconditionally.
     pub fn disabled() -> Self {
         Self {
             enabled: false,
@@ -239,7 +239,7 @@ impl ActiveHealth {
     }
 
     /// Eligible iff disabled, or enabled and currently `Healthy`. `Initial`
-    /// counts as ineligible when `enabled` (pessimistic by construction) —
+    /// counts as ineligible when `enabled` (pessimistic by construction) -
     /// callers that want optimistic startup pass `initial = Healthy`.
     pub fn is_eligible(&self) -> bool {
         if !self.enabled {
@@ -249,7 +249,7 @@ impl ActiveHealth {
     }
 
     /// Record a probe success. Returns `Some((from, to))` if this call caused
-    /// a state flip — callers fire transition metrics on that.
+    /// a state flip - callers fire transition metrics on that.
     pub fn record_success(&self, now_ms: u64) -> Option<(ActiveHealthState, ActiveHealthState)> {
         if !self.enabled {
             return None;
@@ -269,7 +269,7 @@ impl ActiveHealth {
         None
     }
 
-    /// Record a probe failure (any kind — wrong status, timeout, connect
+    /// Record a probe failure (any kind - wrong status, timeout, connect
     /// error). Returns `Some((from, to))` if this call caused a flip.
     pub fn record_failure(&self, now_ms: u64) -> Option<(ActiveHealthState, ActiveHealthState)> {
         if !self.enabled {
@@ -311,7 +311,7 @@ mod tests {
         assert!(l.is_draining());
         assert_eq!(l.drain_started_ms(), 1000);
         // Calling again on the same draining state must succeed but not
-        // overwrite the timestamp — operators want to know when drain *began*.
+        // overwrite the timestamp - operators want to know when drain *began*.
         assert!(l.begin_drain(2000).is_ok());
         assert_eq!(l.drain_started_ms(), 1000);
     }
@@ -322,7 +322,7 @@ mod tests {
         l.begin_drain(1000).unwrap();
         l.mark_drained().unwrap();
         assert!(l.is_drained());
-        // No transition back is possible — undrain must error.
+        // No transition back is possible - undrain must error.
         let err = l.undrain().unwrap_err();
         assert_eq!(err, LifecycleState::Drained);
         // Begin_drain on a drained member is also an error.
@@ -411,7 +411,7 @@ mod tests {
         h.record_failure(1);
         h.record_failure(2);
         h.record_success(3);
-        // Counter reset — needs three more failures to flip, not one.
+        // Counter reset - needs three more failures to flip, not one.
         h.record_failure(4);
         h.record_failure(5);
         assert!(h.is_eligible());

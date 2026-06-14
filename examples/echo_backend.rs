@@ -89,7 +89,7 @@ async fn handle(req: Request<Incoming>, name: &str, peer: SocketAddr) -> Respons
         Value::Null
     } else if body_bytes.len() > MAX_BODY_ECHO_BYTES {
         Value::String(format!(
-            "<truncated, {} bytes total — only the first {} were considered>",
+            "<truncated, {} bytes total - only the first {} were considered>",
             body_bytes.len(),
             MAX_BODY_ECHO_BYTES
         ))

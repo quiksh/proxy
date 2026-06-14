@@ -1,7 +1,7 @@
-//! Admin listener — `/healthz`, `/metrics`, and the `/admin/pools` API.
+//! Admin listener - `/healthz`, `/metrics`, and the `/admin/pools` API.
 //!
 //! The listener runs plain HTTP by default. When any auth group is configured
-//! as `mtls`, the entire listener becomes TLS — `mod.rs::serve` branches once
+//! as `mtls`, the entire listener becomes TLS - `mod.rs::serve` branches once
 //! at startup between `serve_plain` and `serve_tls`. The TLS variant carries
 //! the verified client cert through to the dispatch layer for audit logging.
 //!
@@ -63,7 +63,7 @@ pub async fn serve(
 
     if state.auth_groups.requires_tls() {
         let tls_cfg = tls_cfg.context(
-            "admin auth requires TLS but [admin.tls] is missing — \
+            "admin auth requires TLS but [admin.tls] is missing - \
              this should have been caught at config validation",
         )?;
         let acceptor = build_admin_tls(tls_cfg, state.auth_groups.requires_mtls())?;
@@ -195,7 +195,7 @@ async fn serve_tls(
 /// is true, the configured `client_ca_path` becomes the trust root for the
 /// `WebPkiClientVerifier`.
 fn build_admin_tls(cfg: &AdminTlsConfig, require_client_cert: bool) -> Result<TlsAcceptor> {
-    // Crypto provider — same lazy install pattern as the inbound listener.
+    // Crypto provider - same lazy install pattern as the inbound listener.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let cert_pem = std::fs::read(&cfg.cert_path)
@@ -264,12 +264,12 @@ async fn handle_admin(
 ) -> Response<AdminBody> {
     let path = req.uri().path();
 
-    // Unauthenticated read endpoints — open by design.
+    // Unauthenticated read endpoints - open by design.
     match (req.method(), path) {
         (&Method::GET, "/healthz") | (&Method::GET, "/health") => {
             // 503 across both the pre-drain (edge-withdraw) and drain phases,
             // so a perimeter health check withdraws traffic as soon as
-            // shutdown begins — before the listener actually stops accepting.
+            // shutdown begins - before the listener actually stops accepting.
             return if shutdown.is_health_draining() {
                 plain_response(StatusCode::SERVICE_UNAVAILABLE, "draining\n")
             } else {
@@ -282,7 +282,7 @@ async fn handle_admin(
         _ => {}
     }
 
-    // /admin/* endpoints — auth-gated.
+    // /admin/* endpoints - auth-gated.
     if path.starts_with("/admin/") {
         let req_state = api::RequestState {
             upstreams: &state.upstreams,
@@ -298,7 +298,7 @@ async fn handle_admin(
 }
 
 /// Sort the data lines within each metric block so the output is byte-stable
-/// across scrapes. Prometheus scrapers don't care about order — but a human
+/// across scrapes. Prometheus scrapers don't care about order - but a human
 /// curl'ing `/metrics` repeatedly does, because random reshuffling makes
 /// diffs unreadable.
 fn stable_metrics(text: &str) -> String {

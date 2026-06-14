@@ -16,7 +16,7 @@ bind = "127.0.0.1:9090"
 # ─── Admin auth ────────────────────────────────────────────────────────
 # Per-endpoint-group auth. Both default to `none` for backwards compatibility,
 # but `write` should be set in production. When any group uses `mtls`, the
-# entire admin listener becomes TLS — read clients with `mode = "none"` still
+# entire admin listener becomes TLS - read clients with `mode = "none"` still
 # connect via TLS but don't present a client cert.
 #
 # Bearer token mode reads the token from an env var at startup. The token
@@ -48,7 +48,7 @@ bind = "127.0.0.1:9090"
 [shutdown]
 drain_grace_seconds = 30
 # Edge-withdraw grace. On SIGTERM, /healthz flips to 503 immediately but
-# the proxy keeps accepting for this long *before* the drain begins — giving a
+# the proxy keeps accepting for this long *before* the drain begins - giving a
 # perimeter (e.g. Cloudflare) time to notice the 503 and stop routing, so
 # in-flight requests aren't cut. Default 0 (disabled). A drain-aware edge
 # sidecar that watches /healthz is all that's needed on top of this.
@@ -79,9 +79,9 @@ ejection_max_ms    = 60000 # exponential cap
 # Active health checks. Default: disabled. When enabled, a single probe
 # task per pool sends HTTP requests at `interval_ms` to each member's `path`.
 # Probe traffic does NOT count toward `quik_upstream_bytes_*` or
-# `quik_requests_total` — it lives entirely under `quik_active_health_check_*`.
+# `quik_requests_total` - it lives entirely under `quik_active_health_check_*`.
 #
-# `initial_state = "unhealthy"` (default) is pessimistic — members don't take
+# `initial_state = "unhealthy"` (default) is pessimistic - members don't take
 # traffic until the configured number of probes succeed. Use `"healthy"` for
 # optimistic startup when downtime is more expensive than the risk of routing
 # briefly to a not-yet-ready backend.
@@ -110,7 +110,7 @@ members = [
     { address = "127.0.0.1:8090" },
 ]
 
-# Exact-match route — takes precedence over any prefix.
+# Exact-match route - takes precedence over any prefix.
 # /healthz on either api.example.com or *.api.internal hits users-api.
 [[routes]]
 hosts      = ["api.example.com", "*.api.internal"]
@@ -146,7 +146,7 @@ upstream    = "users-api"
 # ─── Egress proxy (optional) ─────────────────────────────────────────────────
 # Opt-in second role on a separate port: quik also accepts HTTP CONNECT
 # requests and tunnels them to allowed destinations. Only CONNECT is
-# supported — appropriate for filtering outbound HTTPS. The destination
+# supported - appropriate for filtering outbound HTTPS. The destination
 # only sees the proxy's IP, so client identity isn't leaked at the network
 # layer; layer it with auth (below) for application-level audit.
 
@@ -155,7 +155,7 @@ bind            = "0.0.0.0:3128"   # standard forward-proxy port
 default_action  = "deny"           # safer posture: deny anything not explicitly allowed
 sni_enforce     = false            # warn-only when SNI ≠ CONNECT target; flip to true to abort
 
-# Auth mode A: closed-network audit — extract the Basic username, *don't*
+# Auth mode A: closed-network audit - extract the Basic username, *don't*
 # validate the password. The realm is shown in the browser/curl prompt.
 # Appropriate when the network itself is the trust boundary and you just
 # want to know who issued each request.
@@ -163,7 +163,7 @@ sni_enforce     = false            # warn-only when SNI ≠ CONNECT target; flip
 mode  = "basic_log_only"
 realm = "homelab egress"
 
-# Auth mode B: cryptographic — reuse an existing [[auth]] JWT block.
+# Auth mode B: cryptographic - reuse an existing [[auth]] JWT block.
 # Replace the [egress.auth] block above with this one to switch.
 #   [egress.auth]
 #   mode             = "jwt"
@@ -172,7 +172,7 @@ realm = "homelab egress"
 
 # First-match-wins rule list. A rule matches if any of its `hosts` OR any of
 # its `cidrs` hits the request. Hostname targets are also DNS-resolved and
-# checked against cidrs — so a deny rule on 169.254.0.0/16 catches a
+# checked against cidrs - so a deny rule on 169.254.0.0/16 catches a
 # metadata-service bypass attempted via DNS.
 
 [[egress.rules]]
@@ -181,7 +181,7 @@ hosts  = ["*.github.com", "github.com", "*.cloudflare.com", "*.amazonaws.com"]
 
 [[egress.rules]]
 action = "allow"
-cidrs  = ["10.0.0.0/8", "192.168.0.0/16"]   # RFC1918 — internal services
+cidrs  = ["10.0.0.0/8", "192.168.0.0/16"]   # RFC1918 - internal services
 
 [[egress.rules]]
 action = "deny"
@@ -204,7 +204,7 @@ algorithms       = ["RS256", "EdDSA"]
 required_claims  = ["sub"]
 
 # Project verified claims into upstream-bound headers. The mapped header
-# names are reserved — any inbound request that sets one of them is
+# names are reserved - any inbound request that sets one of them is
 # rejected with 403 (rather than silently overwritten).
 inject_headers = [
     { claim = "sub",       header = "x-auth-sub" },

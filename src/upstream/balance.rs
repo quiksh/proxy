@@ -8,8 +8,8 @@
 //!
 //! Random and LeastConnections both scramble a per-pool counter through the
 //! 64-bit golden-ratio constant (`SCRAMBLE`) to choose a starting index.
-//! The 32-bit cousin `0x9E3779B9` is divisible by 3 — biases 3-member pools
-//! to index 0 — so the 64-bit version is non-negotiable here.
+//! The 32-bit cousin `0x9E3779B9` is divisible by 3 - biases 3-member pools
+//! to index 0 - so the 64-bit version is non-negotiable here.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use super::{Upstream, unix_now_ms};
 
 /// 64-bit golden-ratio multiplicative-hash constant (2^64 / φ). Maps a
-/// sequential counter onto a scrambled but uniformly-distributed sequence —
+/// sequential counter onto a scrambled but uniformly-distributed sequence -
 /// gives "random-looking" member selection at exactly the cost of
 /// round-robin (no PRNG state). The 64-bit constant is coprime to all small
 /// pool sizes; its 32-bit cousin 0x9E3779B9 is divisible by 3 which biases
@@ -79,7 +79,7 @@ impl Balancer for RoundRobin {
 
 /// Multiplicative-hash variant of round-robin. Same atomic cost, but the
 /// scramble means consecutive requests jump around the member list rather
-/// than walking sequentially — useful when downstream observers shouldn't
+/// than walking sequentially - useful when downstream observers shouldn't
 /// see a predictable rotation.
 #[derive(Default)]
 pub struct Random {
@@ -113,7 +113,7 @@ impl Balancer for Random {
 }
 
 /// Pick the eligible member with the lowest current in-flight count.
-/// Self-balances against heterogeneous backend response times — slow
+/// Self-balances against heterogeneous backend response times - slow
 /// backends accumulate in-flight and the LB steers around them.
 ///
 /// Tie-breaker uses the same multiplicative-hash trick so a row of zero-load
@@ -235,7 +235,7 @@ mod tests {
 
     #[test]
     fn least_connections_tie_break_distributes() {
-        // All zero — selection should distribute across all members via the
+        // All zero - selection should distribute across all members via the
         // multiplicative-hash tie-breaker.
         let members = vec![make_upstream("a"), make_upstream("b"), make_upstream("c")];
         let lc = LeastConnections::new();
@@ -247,7 +247,7 @@ mod tests {
         for m in ["a", "b", "c"] {
             assert!(
                 counts.get(m).copied().unwrap_or(0) > 0,
-                "{m} never selected — tie-breaker not distributing"
+                "{m} never selected - tie-breaker not distributing"
             );
         }
     }

@@ -8,7 +8,7 @@
 //! attach automatically to every event emitted within the request.
 //!
 //! Metric histogram buckets are tuned for proxy hop targets (p50 < 200µs,
-//! p99 < 1ms) — coarser buckets miss interesting latency, finer ones bloat
+//! p99 < 1ms) - coarser buckets miss interesting latency, finer ones bloat
 //! the cardinality budget.
 //!
 //! [`inflight_sampler`] copies each upstream's atomic inflight counter into
@@ -134,7 +134,7 @@ pub fn init_metrics() -> Result<PrometheusHandle> {
     );
     metrics::describe_gauge!(
         "quik_upstream_inflight",
-        "Current in-flight requests per upstream member (sampled — gauge is updated periodically, not per-request)"
+        "Current in-flight requests per upstream member (sampled - gauge is updated periodically, not per-request)"
     );
 
     // Live registration + active health
@@ -190,7 +190,7 @@ pub fn init_metrics() -> Result<PrometheusHandle> {
 
 /// Periodically copy each upstream member's `inflight` counter into a
 /// Prometheus gauge. Sampling (rather than per-request emission) keeps the
-/// hot path allocation-free for the metric labels — the pre-built gauge
+/// hot path allocation-free for the metric labels - the pre-built gauge
 /// handle on each `Upstream` is just an `Arc` clone.
 ///
 /// Runs until drain is triggered, then returns so the runtime can finish.

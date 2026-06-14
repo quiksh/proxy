@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("binding listener {}", cfg.listener.bind))?;
 
-    // Resolve admin auth — env-var-backed tokens fail fast on missing vars.
+    // Resolve admin auth - env-var-backed tokens fail fast on missing vars.
     let admin_auth =
         admin::compile_auth(&cfg.admin).context("compiling admin auth (check token env vars)")?;
     let admin_state = admin::AdminState {
@@ -126,7 +126,7 @@ async fn main() -> Result<()> {
     ));
 
     // Optional egress (forward) proxy. Only spawned when `[egress]` is in
-    // config — quik runs purely as a reverse proxy if the block is absent.
+    // config - quik runs purely as a reverse proxy if the block is absent.
     let egress_task = if let Some(egress_cfg) = &cfg.egress {
         let policy = Arc::new(egress::EgressPolicy::from_config_with_auth(
             egress_cfg,
@@ -161,7 +161,7 @@ async fn main() -> Result<()> {
             }
         }
         shutdown::ExitReason::Forced => {
-            tracing::warn!("force exit — skipping drain grace, in-flight requests will be aborted");
+            tracing::warn!("force exit - skipping drain grace, in-flight requests will be aborted");
             proxy_task.abort();
             admin_task.abort();
             if let Some(t) = egress_task {

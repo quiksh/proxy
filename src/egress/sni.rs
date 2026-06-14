@@ -4,7 +4,7 @@
 //! handshake header, and the ClientHello extensions until we find the
 //! `server_name` extension (type 0), then return its hostname value. Any
 //! parse failure (truncated buffer, wrong record type, no SNI extension)
-//! returns `None` rather than erroring — the caller logs and moves on.
+//! returns `None` rather than erroring - the caller logs and moves on.
 //!
 //! Returns the *lowercased* SNI hostname so callers comparing against
 //! their CONNECT target don't have to normalise.
@@ -32,7 +32,7 @@ pub fn extract_sni(buf: &[u8]) -> Option<String> {
     let _record_version = p.u16()?;
     let record_len = p.u16()? as usize;
     if record_len + 5 > buf.len() {
-        // We don't have the full record buffered — we still try, since the
+        // We don't have the full record buffered - we still try, since the
         // ClientHello + server_name often fit in the first few hundred
         // bytes. If our window cuts off mid-extension, the inner parse
         // will fail safely.

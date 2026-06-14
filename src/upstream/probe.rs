@@ -1,4 +1,4 @@
-//! Active health probe task — one per pool with `active_health.enabled`.
+//! Active health probe task - one per pool with `active_health.enabled`.
 //!
 //! Tick at the configured interval, snapshot the pool's members, fire a probe
 //! at each one whose lifecycle is `active`. Update the per-member
@@ -23,7 +23,7 @@ use crate::upstream::{Upstream, UpstreamPoolEntry, into_proxy_body, unix_now_ms}
 
 /// Run the probe loop for one pool. Exits when the shutdown coordinator
 /// signals drain start. The task takes a snapshot of the member list on
-/// each tick — admin-API add/remove takes effect on the next tick.
+/// each tick - admin-API add/remove takes effect on the next tick.
 pub async fn run_pool_probes(pool: Arc<UpstreamPoolEntry>, shutdown: Coordinator) {
     let cfg = pool.active_health_cfg.clone();
     debug_assert!(
@@ -53,7 +53,7 @@ pub async fn run_pool_probes(pool: Arc<UpstreamPoolEntry>, shutdown: Coordinator
             _ = tick.tick() => {
                 let members = pool.members_snapshot();
                 for member in members.iter() {
-                    // Skip drained/draining members — operator has taken
+                    // Skip drained/draining members - operator has taken
                     // them out; probing them is wasted work and would also
                     // pollute the transition metrics.
                     if !member.lifecycle.is_active() {

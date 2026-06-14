@@ -25,7 +25,7 @@ subject         = "reg.shop.checkout.>"
 # ".svc" host-suffix admits the whole service group. In a real homelab this is
 # typically your LAN range, e.g. ["192.168.0.0/16"].
 allow_addresses = [".svc"]
-# Generous backstop — sized for blue/green overlap (blue+green ≈ 2× steady state).
+# Generous backstop - sized for blue/green overlap (blue+green ≈ 2× steady state).
 max_members               = 50
 max_instances_per_service = 50
 
