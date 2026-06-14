@@ -1,9 +1,14 @@
-//! quik-register — a service-registration sidecar for quik.
+//! quik-register - a service-registration sidecar for quik.
 //!
-//! Health-checks a local service and registers it into a NATS JetStream KV
-//! bucket while healthy (heartbeating the lease), deregistering it when it
-//! fails or on shutdown. quik's NATS watcher reconciles the bucket into its
-//! pool. See `docs/service-registration.md`.
+//! Liveness-probes a local instance and registers it into a NATS JetStream KV
+//! bucket while it stays alive (heartbeating the lease), deregistering it when
+//! it fails or on shutdown. The liveness gate decides registry membership, not
+//! routing - quik's own active health decides routing. quik's NATS watcher
+//! reconciles the bucket into its pool. See `docs/service-registration.md`.
+//!
+//! quik-register is one writer onto the KV registration contract, suited to
+//! environments without an orchestrator; a container/orchestrator-level
+//! publisher or an in-process `async-nats` client are equally valid writers.
 //!
 //!   quik-register --config /etc/quik-register/quik-register.toml
 

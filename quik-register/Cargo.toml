@@ -3,7 +3,7 @@ name = "quik-register"
 version = "0.0.0"
 edition = "2024"
 license = "MIT"
-description = "Service-registration sidecar for quik: health-gated self-registration into a NATS JetStream KV bucket."
+description = "Service-registration sidecar for quik: liveness-gated self-registration into a NATS JetStream KV bucket."
 
 [[bin]]
 name = "quik-register"
@@ -25,5 +25,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 anyhow = "1"
+# The registration payload is built once and re-published every heartbeat;
+# holding it as Bytes makes each re-put a cheap refcount bump, not a deep copy.
+bytes = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
