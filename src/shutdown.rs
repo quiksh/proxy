@@ -5,7 +5,7 @@
 //! 1. **pre-drain (edge-withdraw):** `/healthz` flips to 503 immediately but
 //!    the listeners keep accepting for `pre_drain_grace_seconds`. This lets a
 //!    perimeter (e.g. Cloudflare) notice the 503 via its own health check and
-//!    stop routing *before* we stop accepting — so in-flight requests aren't
+//!    stop routing *before* we stop accepting - so in-flight requests aren't
 //!    cut. With `pre_drain_grace_seconds = 0` (the default) this phase is
 //!    instantaneous and behaviour matches a proxy with no edge in front.
 //! 2. **drain:** listeners stop accepting; in-flight requests get up to
@@ -32,7 +32,7 @@ pub enum ExitReason {
     /// Drain was triggered (SIGTERM/SIGINT or programmatic) and the
     /// configured `drain_grace_seconds` elapsed normally.
     DrainComplete,
-    /// A second signal arrived while we were waiting for drain — operator
+    /// A second signal arrived while we were waiting for drain - operator
     /// asked us to skip the rest of the grace period and bail out now.
     Forced,
 }
@@ -68,7 +68,7 @@ impl Coordinator {
         }
     }
 
-    /// True once the proxy has begun shutting down — covers both the pre-drain
+    /// True once the proxy has begun shutting down - covers both the pre-drain
     /// (edge-withdraw) phase and the drain phase. Drives `/healthz` → 503.
     pub fn is_health_draining(&self) -> bool {
         *self.health_drain_rx.borrow()
@@ -103,7 +103,7 @@ impl Coordinator {
     /// health-draining so `/healthz` reflects shutdown even if drain is
     /// triggered directly (e.g. by a test) without a pre-drain phase.
     pub fn trigger_drain(&self) {
-        let _ = self.health_drain_tx.send(true);
+        self.begin_pre_drain();
         let _ = self.drain_tx.send(true);
     }
 
@@ -116,7 +116,7 @@ impl Coordinator {
 
     /// Run the phased shutdown: pre-drain (edge-withdraw) → wait
     /// `pre_drain_grace` (or until force) → drain. Shared by the signal handler
-    /// and by tests. Does not itself trigger force — the caller (second signal)
+    /// and by tests. Does not itself trigger force - the caller (second signal)
     /// does that, and this observes it to cut the pre-drain wait short.
     pub async fn run_shutdown_sequence(&self) {
         self.begin_pre_drain();
@@ -159,10 +159,10 @@ impl Coordinator {
             // the drain grace alike. A *third* signal is the OS default.
             tokio::select! {
                 _ = sigterm.recv() => tracing::warn!(
-                    "received SIGTERM again — forcing immediate shutdown, in-flight requests will be aborted"
+                    "received SIGTERM again - forcing immediate shutdown, in-flight requests will be aborted"
                 ),
                 _ = sigint.recv()  => tracing::warn!(
-                    "received SIGINT again — forcing immediate shutdown, in-flight requests will be aborted"
+                    "received SIGINT again - forcing immediate shutdown, in-flight requests will be aborted"
                 ),
             }
             coord.trigger_force();
@@ -187,7 +187,7 @@ impl Coordinator {
         let _ = rx.changed().await;
     }
 
-    /// Block until the proxy should exit. Returns the reason — drain
+    /// Block until the proxy should exit. Returns the reason - drain
     /// completed normally vs operator-forced.
     pub async fn wait_for_exit(&self) -> ExitReason {
         self.wait_for_drain_start().await;
@@ -197,7 +197,7 @@ impl Coordinator {
         }
     }
 
-    /// Compatibility shim — preserves the older `wait_for_drain()` signature
+    /// Compatibility shim - preserves the older `wait_for_drain()` signature
     /// for tests and any external callers. Returns when the proxy should
     /// exit regardless of reason.
     pub async fn wait_for_drain(&self) {
@@ -230,7 +230,7 @@ mod tests {
         assert_eq!(reason, ExitReason::Forced);
         assert!(
             elapsed < Duration::from_millis(500),
-            "force should short-circuit the drain — took {elapsed:?}"
+            "force should short-circuit the drain - took {elapsed:?}"
         );
     }
 
@@ -246,7 +246,7 @@ mod tests {
     async fn force_alone_also_exits() {
         // Some callers may want to force-exit without first triggering drain.
         // wait_for_exit() requires drain to start, so this path is "drain
-        // then force" — exercise it.
+        // then force" - exercise it.
         let coord = Coordinator::new(60, 0);
         let coord_clone = coord.clone();
         tokio::spawn(async move {
@@ -288,7 +288,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn force_during_pre_drain_cuts_the_grace() {
-        // A huge grace that we never actually wait out — force must cut it.
+        // A huge grace that we never actually wait out - force must cut it.
         let coord = Coordinator::new(60, 3600);
         let c = coord.clone();
         let h = tokio::spawn(async move { c.run_shutdown_sequence().await });
