@@ -46,19 +46,21 @@ use tracing::Instrument;
 use crate::auth::{AuthError, AuthRegistry, extract_bearer_token};
 use crate::config::Mode;
 use crate::headers::{
-    apply_forwarded_for, apply_forwarded_host, apply_forwarded_proto, ensure_request_id,
-    ensure_traceparent, strip_hop_by_hop,
+    ForwardedPolicy, apply_forwarded, apply_forwarded_for, apply_forwarded_host,
+    apply_forwarded_proto, ensure_request_id, ensure_traceparent, strip_hop_by_hop,
 };
 use crate::routing::SharedRoutingTable;
 use crate::shutdown::Coordinator;
 use crate::upstream::{CountingBody, InflightGuard, Pool, ProxyBody};
 
 /// Per-request context that flows through the forward pipeline alongside the
-/// borrowed routing table / upstream pool.
-#[derive(Clone, Copy)]
+/// borrowed routing table / upstream pool. Cheap to clone (the policy is an
+/// `Arc` refcount bump); no longer `Copy` because of it.
+#[derive(Clone)]
 pub struct RequestContext {
     pub peer: SocketAddr,
     pub mode: Mode,
+    pub forwarded: Arc<ForwardedPolicy>,
 }
 
 /// Shared context required by the WebSocket upgrade path. Carries the bits
@@ -77,6 +79,8 @@ pub struct ServerState {
     pub upstreams: Arc<Pool>,
     pub auth: Arc<AuthRegistry>,
     pub mode: Mode,
+    /// Forwarding-header policy (trusted proxies + RFC 7239 emit toggle).
+    pub forwarded: Arc<ForwardedPolicy>,
     /// Defensive timeouts + protocol-level limits applied to every inbound
     /// connection. Cloned cheaply (small POD).
     pub limits: Arc<crate::config::ListenerLimitsConfig>,
@@ -144,6 +148,7 @@ async fn handle_connection(
     let ctx = RequestContext {
         peer,
         mode: state.mode,
+        forwarded: state.forwarded.clone(),
     };
     let tls_start = Instant::now();
     let tls_stream = match tls.accept(tcp).await {
@@ -175,6 +180,7 @@ async fn handle_connection(
     let svc = service_fn(move |req: Request<Incoming>| {
         let state = state.clone();
         let ws_ctx = ws_ctx.clone();
+        let ctx = ctx.clone();
         async move {
             let resp = forward(
                 req,
@@ -452,10 +458,20 @@ async fn forward_inner(
     // carries it from early failures too. We only inject the remaining ones
     // here, on the upstream-bound request.
     let _traceparent = ensure_traceparent(&mut parts.headers);
-    apply_forwarded_for(&mut parts.headers, ctx.peer.ip(), ctx.mode);
+    let peer_ip = ctx.peer.ip();
+    let trusted = ctx.forwarded.trusts(peer_ip, ctx.mode);
+    apply_forwarded_for(&mut parts.headers, peer_ip, trusted);
     apply_forwarded_host(&mut parts.headers, inbound_host_owned.as_deref());
     // We always terminate TLS on the inbound side, so upstream sees https.
     apply_forwarded_proto(&mut parts.headers, "https");
+    if ctx.forwarded.emit {
+        apply_forwarded(
+            &mut parts.headers,
+            peer_ip,
+            inbound_host_owned.as_deref(),
+            trusted,
+        );
+    }
 
     // ── max_body_bytes stream enforcement ────────────────────────────────────
     // Content-Length pre-check above handles the declared-size case. For
@@ -823,9 +839,19 @@ async fn handle_ws_upgrade(
     // wants to know the original client IP / host even for upgrades.
     ensure_request_id(&mut parts.headers);
     ensure_traceparent(&mut parts.headers);
-    apply_forwarded_for(&mut parts.headers, ctx.peer.ip(), ctx.mode);
+    let peer_ip = ctx.peer.ip();
+    let trusted = ctx.forwarded.trusts(peer_ip, ctx.mode);
+    apply_forwarded_for(&mut parts.headers, peer_ip, trusted);
     apply_forwarded_host(&mut parts.headers, inbound_host_owned.as_deref());
     apply_forwarded_proto(&mut parts.headers, "https");
+    if ctx.forwarded.emit {
+        apply_forwarded(
+            &mut parts.headers,
+            peer_ip,
+            inbound_host_owned.as_deref(),
+            trusted,
+        );
+    }
 
     let body: ProxyBody = into_proxy_body(body);
     let out_req = Request::from_parts(parts, body);

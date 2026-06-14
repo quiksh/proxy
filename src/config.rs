@@ -17,6 +17,9 @@ use serde::Deserialize;
 pub struct Config {
     #[serde(default)]
     pub mode: Mode,
+    /// Forwarding-header policy (trusted proxies, RFC 7239 `Forwarded`).
+    #[serde(default)]
+    pub forwarded: ForwardedConfig,
     pub listener: ListenerConfig,
     pub admin: AdminConfig,
     #[serde(default)]
@@ -222,6 +225,25 @@ pub enum Mode {
     #[default]
     Edge,
     Host,
+}
+
+/// Forwarding-header behaviour. Optional - when absent, the proxy keeps its
+/// mode-driven defaults: `X-Forwarded-*` always emitted, inbound chains
+/// trusted only in `host` mode, no RFC 7239 `Forwarded` header.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ForwardedConfig {
+    /// CIDR blocks (`10.0.0.0/8`) or bare IP literals whose forwarding
+    /// headers we trust. In `edge` mode, a request whose immediate peer is
+    /// inside one of these is treated like `host` mode for that request: the
+    /// inbound `X-Forwarded-For` / `Forwarded` chain is appended to rather
+    /// than replaced. Has no effect in `host` mode (which already trusts the
+    /// chain). Empty → today's behaviour.
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
+    /// Also emit the RFC 7239 `Forwarded` header (in addition to the
+    /// `X-Forwarded-*` family, which is always emitted). Default: false.
+    #[serde(default)]
+    pub emit: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -857,6 +879,12 @@ fn validate(cfg: &Config) -> Result<()> {
     let auth_names: HashSet<&str> = cfg.auth.iter().map(|a| a.name.as_str()).collect();
     if auth_names.len() != cfg.auth.len() {
         anyhow::bail!("duplicate auth block names");
+    }
+    // Fail fast on a malformed trusted-proxy entry rather than silently
+    // trusting nobody at runtime (same parsing as headers::ForwardedPolicy).
+    for entry in &cfg.forwarded.trusted_proxies {
+        crate::headers::parse_trusted_proxy(entry)
+            .with_context(|| format!("[forwarded].trusted_proxies entry '{entry}'"))?;
     }
     for r in &cfg.routes {
         if !names.contains(r.upstream.as_str()) {

@@ -620,11 +620,30 @@ pub fn route(path_prefix: &str, upstream: &str) -> RouteConfig {
 }
 
 pub async fn spawn_proxy(spec: ProxySpec) -> ProxyHandle {
-    spawn_proxy_full(spec, Mode::Edge, vec![], None, None, None).await
+    spawn_proxy_full(
+        spec,
+        Mode::Edge,
+        vec![],
+        None,
+        None,
+        None,
+        Default::default(),
+    )
+    .await
 }
 
 pub async fn spawn_proxy_with_mode(spec: ProxySpec, mode: Mode) -> ProxyHandle {
-    spawn_proxy_full(spec, mode, vec![], None, None, None).await
+    spawn_proxy_full(spec, mode, vec![], None, None, None, Default::default()).await
+}
+
+/// Spawn a proxy with a `[forwarded]` policy (trusted proxies / RFC 7239
+/// emit). Used by the forwarding-header e2e tests.
+pub async fn spawn_proxy_with_forwarded(
+    spec: ProxySpec,
+    mode: Mode,
+    forwarded: quik::config::ForwardedConfig,
+) -> ProxyHandle {
+    spawn_proxy_full(spec, mode, vec![], None, None, None, forwarded).await
 }
 
 /// Spawn a proxy with overridden listener limits. Used by the hardening
@@ -633,14 +652,32 @@ pub async fn spawn_proxy_with_limits(
     spec: ProxySpec,
     limits: quik::config::ListenerLimitsConfig,
 ) -> ProxyHandle {
-    spawn_proxy_full(spec, Mode::Edge, vec![], None, Some(limits), None).await
+    spawn_proxy_full(
+        spec,
+        Mode::Edge,
+        vec![],
+        None,
+        Some(limits),
+        None,
+        Default::default(),
+    )
+    .await
 }
 
 pub async fn spawn_proxy_with_auth(
     spec: ProxySpec,
     auth_blocks: Vec<AuthBlockConfig>,
 ) -> ProxyHandle {
-    spawn_proxy_full(spec, Mode::Edge, auth_blocks, None, None, None).await
+    spawn_proxy_full(
+        spec,
+        Mode::Edge,
+        auth_blocks,
+        None,
+        None,
+        None,
+        Default::default(),
+    )
+    .await
 }
 
 /// Spawn a proxy with admin auth configured. Used by the admin-auth e2e
@@ -649,13 +686,31 @@ pub async fn spawn_proxy_with_admin_auth(
     spec: ProxySpec,
     admin_auth: quik::config::AdminAuthGroups,
 ) -> ProxyHandle {
-    spawn_proxy_full(spec, Mode::Edge, vec![], Some(admin_auth), None, None).await
+    spawn_proxy_full(
+        spec,
+        Mode::Edge,
+        vec![],
+        Some(admin_auth),
+        None,
+        None,
+        Default::default(),
+    )
+    .await
 }
 
 /// Spawn a proxy with a top-level `[nats]` config - used by the e2e_nats tests.
 /// The watcher is only spawned in a `--features nats` build.
 pub async fn spawn_proxy_with_nats(spec: ProxySpec, nats: quik::config::NatsConfig) -> ProxyHandle {
-    spawn_proxy_full(spec, Mode::Edge, vec![], None, None, Some(nats)).await
+    spawn_proxy_full(
+        spec,
+        Mode::Edge,
+        vec![],
+        None,
+        None,
+        Some(nats),
+        Default::default(),
+    )
+    .await
 }
 
 async fn spawn_proxy_full(
@@ -665,6 +720,7 @@ async fn spawn_proxy_full(
     admin_auth: Option<quik::config::AdminAuthGroups>,
     limits: Option<quik::config::ListenerLimitsConfig>,
     nats: Option<quik::config::NatsConfig>,
+    forwarded: quik::config::ForwardedConfig,
 ) -> ProxyHandle {
     let cert = gen_cert();
 
@@ -699,6 +755,7 @@ async fn spawn_proxy_full(
 
     let cfg = Config {
         mode,
+        forwarded,
         listener: ListenerConfig {
             bind: "127.0.0.1:0".parse().unwrap(),
             tls: TlsConfig {
@@ -806,6 +863,9 @@ async fn spawn_proxy_full(
             upstreams: upstreams.clone(),
             auth: auth_registry,
             mode: cfg.mode,
+            forwarded: std::sync::Arc::new(quik::headers::ForwardedPolicy::from_config(
+                &cfg.forwarded,
+            )),
             limits: std::sync::Arc::new(cfg.listener.limits.clone()),
         },
         shutdown.clone(),
