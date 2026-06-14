@@ -1,0 +1,43 @@
+# Homelab quik config, AUTHENTICATED variant (used by docker-compose.yml).
+# Identical to quik.toml but for the NATS credential: quik connects with the
+# `quik` creds (subscribe the bucket, publish override.*). See auth/README.md.
+
+[listener]
+bind = "0.0.0.0:8443"
+
+[listener.tls]
+cert_path = "/tls/cert.pem"
+key_path  = "/tls/key.pem"
+
+[admin]
+bind = "0.0.0.0:9090"
+
+[nats]
+url        = "nats://nats:4222"          # tls:// in production (creds in clear otherwise)
+bucket     = "quik_registrations"
+creds_file = "/etc/quik/nats.creds"      # the `quik` identity (auth/quik.creds)
+
+[[upstreams]]
+name     = "checkout"
+balancer = "least_connections"
+
+[upstreams.nats]
+subject         = "reg.shop.checkout.>"
+allow_addresses = [".svc"]
+max_members               = 50
+max_instances_per_service = 50
+
+[upstreams.active_health]
+enabled             = true
+path                = "/healthz"
+interval_ms         = 1000
+healthy_threshold   = 1
+unhealthy_threshold = 2
+initial_state       = "unhealthy"
+
+[upstreams.drain]
+timeout_ms = 5000
+
+[[routes]]
+path_prefix = "/"
+upstream    = "checkout"

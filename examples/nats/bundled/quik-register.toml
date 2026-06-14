@@ -1,0 +1,27 @@
+# quik-register config for a tier-2b shared-fate bundle (one container holding
+# the service + this sidecar). Differs from the standalone examples/nats config
+# in one way that matters: the liveness probe is OFF.
+
+[nats]
+url    = "${NATS_URL:-nats://nats:4222}"
+bucket = "${BUCKET:-quik_registrations}"
+# creds_file = "/etc/quik-register/nats.creds"   # decentralised-JWT; use tls:// url
+
+[service]
+namespace = "${NAMESPACE:-shop}"
+service   = "${SERVICE:-checkout}"
+instance  = "${INSTANCE}"          # unique per replica
+# What quik routes to: must be reachable FROM quik (a network alias/IP), not the
+# container's own loopback - quik runs in a different container. This is distinct
+# from where a liveness probe would connect (localhost, same container).
+address   = "${ADDR}"
+scheme    = "http"
+
+# Shared fate is provided by the supervisor (bundle-entrypoint.sh): if the
+# service dies, the registrar dies with it, the heartbeat stops, and the lease
+# expires - so the registrar cannot zombie. The liveness probe is therefore
+# redundant for detecting instance death and is disabled; the heartbeat runs
+# unconditionally. Set enabled = true to add it back as defence-in-depth - it
+# additionally catches an alive-but-wedged instance (docs §6).
+[liveness]
+enabled = false

@@ -1,0 +1,81 @@
+# Homelab NATS demo - NO-AUTH variant.
+#
+# ⚠️  INSECURE - MINIMAL DEMO ONLY. NATS runs with no authentication, so ANY
+#     process that can reach it may register, overwrite, or drain any backend
+#     (write access to the bucket is traffic-steering power - docs §10). It is
+#     bound to loopback (127.0.0.1) to limit exposure, but that is NOT a
+#     substitute for auth. Do not use this on a real homelab or anything beyond
+#     a throwaway laptop run. The default stack (docker-compose.yml) is
+#     authenticated - prefer it. See auth/README.md.
+#
+#   ../../../scripts/gen-dev-cert.sh
+#   docker compose -f examples/nats/homelab/docker-compose.no-auth.yml up -d --build
+name: quik-nats-homelab
+
+services:
+  nats:
+    image: nats:2.11
+    command: ["-c", "/etc/nats/nats.conf"]
+    volumes:
+      - ./nats.conf:/etc/nats/nats.conf:ro
+      - nats-data:/data
+    ports: ["127.0.0.1:4222:4222", "127.0.0.1:8222:8222"]  # loopback only
+
+  # One-shot: create the TTL+history bucket the watcher reconciles from.
+  nats-setup:
+    image: natsio/nats-box
+    depends_on: [nats]
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["nats -s nats:4222 kv add quik_registrations --ttl=30s --history=1 || true"]
+
+  quik:
+    build:
+      context: ../../..
+      dockerfile: examples/nats/Dockerfile.quik
+    depends_on: [nats-setup]
+    volumes:
+      - ./quik.toml:/etc/quik/config.toml:ro
+      - ../../../tls:/tls:ro
+    ports: ["8443:8443", "9090:9090"]
+
+  checkout-1:
+    # Tag the built image so provision.sh can start more backends from it.
+    image: quik-echo:demo
+    build: { context: ../../.., dockerfile: examples/nats/Dockerfile.echo }
+    environment: { BIND_ADDR: "0.0.0.0:8080", BACKEND_NAME: checkout-1 }
+    networks:
+      default: { aliases: ["checkout-1.svc"] }
+  checkout-1-reg:
+    # The quik-register agent: liveness-gated registration. Tag it so provision.sh
+    # can start registrars for ad-hoc backends.
+    image: quik-register:demo
+    build: { context: ../../.., dockerfile: quik-register/Dockerfile }
+    depends_on: [nats-setup, checkout-1]
+    volumes: ["../quik-register.toml:/etc/quik-register/quik-register.toml:ro"]
+    environment:
+      INSTANCE: checkout-1
+      ADDR: "checkout-1.svc:8080"
+
+  checkout-2:
+    image: quik-echo:demo
+    build: { context: ../../.., dockerfile: examples/nats/Dockerfile.echo }
+    environment: { BIND_ADDR: "0.0.0.0:8080", BACKEND_NAME: checkout-2 }
+    networks:
+      default: { aliases: ["checkout-2.svc"] }
+  checkout-2-reg:
+    image: quik-register:demo
+    build: { context: ../../.., dockerfile: quik-register/Dockerfile }
+    depends_on: [nats-setup, checkout-2]
+    volumes: ["../quik-register.toml:/etc/quik-register/quik-register.toml:ro"]
+    environment:
+      INSTANCE: checkout-2
+      ADDR: "checkout-2.svc:8080"
+
+volumes:
+  nats-data: {}
+
+# Explicit network name so provision.sh can attach ad-hoc backends to it.
+networks:
+  default:
+    name: quik-nats

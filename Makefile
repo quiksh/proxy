@@ -8,20 +8,20 @@ help: ## Show this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make \033[36m<target>\033[0m\n\nTargets:\n"} \
 		/^[a-zA-Z_-]+:.*?##/ {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-build: ## Debug build of all targets.
-	$(CARGO) build --all-targets
+build: ## Debug build of all workspace targets.
+	$(CARGO) build --workspace --all-targets
 
-release: ## Optimised release build of the binary.
-	$(CARGO) build --release
+release: ## Optimised release build of all workspace binaries.
+	$(CARGO) build --workspace --release
 
 run: ## Run quik against $(CONFIG) (default: config/example.toml).
 	$(CARGO) run --release -- --config $(CONFIG)
 
 test: ## Run the full test suite.
-	$(CARGO) test
+	$(CARGO) test --workspace
 
 test-quiet: ## Run tests with reduced output.
-	$(CARGO) test --quiet
+	$(CARGO) test --workspace --quiet
 
 bench: ## Run criterion benchmarks.
 	$(CARGO) bench
@@ -33,7 +33,7 @@ fmt-check: ## Verify the workspace is formatted (used in CI).
 	$(CARGO) fmt --all -- --check
 
 lint: ## Run clippy with warnings as errors.
-	$(CARGO) clippy --all-targets --all-features -- -D warnings
+	$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
 
 clippy: lint ## Alias for lint.
 

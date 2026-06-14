@@ -1,0 +1,32 @@
+[package]
+name = "quik-register"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+description = "Service-registration sidecar for quik: liveness-gated self-registration into a NATS JetStream KV bucket."
+
+[[bin]]
+name = "quik-register"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "net", "time", "signal"] }
+async-nats = { version = "0.49", default-features = false, features = [
+    "ring",
+    "jetstream",
+    "kv",
+    "nkeys",
+    "server_2_10",
+    "server_2_11",
+] }
+# http/https health checks; tcp checks use tokio directly.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+anyhow = "1"
+# The registration payload is built once and re-published every heartbeat;
+# holding it as Bytes makes each re-put a cheap refcount bump, not a deep copy.
+bytes = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

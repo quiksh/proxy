@@ -35,13 +35,64 @@ pub struct Config {
     /// rules. Absent → no egress listener.
     #[serde(default)]
     pub egress: Option<EgressConfig>,
+    /// Optional NATS-backed service registration. Only *acted upon* in a
+    /// `--features nats` build; parsed unconditionally so a config is portable
+    /// and a feature/config mismatch fails fast (see `validate`).
+    #[serde(default)]
+    pub nats: Option<NatsConfig>,
+}
+
+/// Connection settings for the NATS service-registration watcher.
+/// See `docs/service-registration.md`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NatsConfig {
+    /// NATS server URL, e.g. `nats://host:4222` or `tls://host:4222`.
+    pub url: String,
+    /// JetStream KV bucket holding registrations.
+    pub bucket: String,
+    /// Path to a NATS credentials file (decentralised JWT). Omit for no-auth
+    /// (local demo) or when credentials are supplied another way.
+    #[serde(default)]
+    pub creds_file: Option<PathBuf>,
+    /// Seconds between reconnect attempts while the connection is down.
+    #[serde(default = "default_nats_reconnect_secs")]
+    pub reconnect_secs: u64,
+}
+
+fn default_nats_reconnect_secs() -> u64 {
+    5
+}
+
+/// Per-pool NATS registration binding. A pool carrying this block is populated
+/// from the KV subtree `subject`; backends self-register there. The hardening
+/// controls live here: the registrable-address allow-list and the member
+/// caps.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpstreamNatsConfig {
+    /// KV key subject filter feeding this pool, e.g. `reg.shop.checkout.>`.
+    pub subject: String,
+    /// Registrable-address allow-list: CIDR (`10.0.0.0/8`) or host-suffix
+    /// (`.svc.cluster.local`) entries. A self-asserted address outside this set
+    /// is rejected. Required (and non-empty) - a pool admitting self-registered
+    /// members must state where they may live; this fails *safe*.
+    #[serde(default)]
+    pub allow_addresses: Vec<String>,
+    /// Generous backstop cap on total members in this pool. `None` ⇒ no
+    /// cap. Size it well above the real fleet - a tight cap fails *unsafe*
+    /// (it locks out legitimate new capacity). Pair with short TTLs + alerting.
+    #[serde(default)]
+    pub max_members: Option<u32>,
+    /// Cap on instances per service subtree, i.e. per `reg.<ns>.<service>.*`
+    /// (the surgical anti-abuse control). `None` ⇒ no cap.
+    #[serde(default)]
+    pub max_instances_per_service: Option<u32>,
 }
 
 /// Forward / egress proxy listener configuration.
 ///
 /// quik is primarily a reverse proxy; this is an opt-in second role on a
 /// separate port. Only HTTP `CONNECT` is supported (not absolute-URI
-/// forwarding) — appropriate for filtering outbound HTTPS traffic. SNI
+/// forwarding) - appropriate for filtering outbound HTTPS traffic. SNI
 /// sniffing peeks at the TLS ClientHello on the tunnel for logging, and
 /// optionally enforces that the SNI matches the CONNECT target.
 #[derive(Debug, Deserialize)]
@@ -53,7 +104,7 @@ pub struct EgressConfig {
     pub default_action: EgressAction,
     /// If true, abort the tunnel when the TLS ClientHello's SNI doesn't
     /// match the CONNECT target host. If false (default), log a warning
-    /// and continue — useful for initial observability before tightening.
+    /// and continue - useful for initial observability before tightening.
     #[serde(default)]
     pub sni_enforce: bool,
     /// First-match-wins rule list. A rule matches if the request hits
@@ -61,7 +112,7 @@ pub struct EgressConfig {
     #[serde(default)]
     pub rules: Vec<EgressRuleConfig>,
     /// Optional proxy authentication. When set, every CONNECT request must
-    /// carry a matching `Proxy-Authorization` header — missing/invalid
+    /// carry a matching `Proxy-Authorization` header - missing/invalid
     /// auth gets a `407 Proxy Authentication Required` challenge.
     #[serde(default)]
     pub auth: Option<EgressAuthConfig>,
@@ -71,13 +122,13 @@ pub struct EgressConfig {
 ///
 /// Two modes:
 /// - **Jwt**: cryptographic validation against an existing `[[auth]]` block
-///   (full token verification, kid resolution, etc. — same machinery the
+///   (full token verification, kid resolution, etc. - same machinery the
 ///   reverse-proxy uses on `/secure` routes). The `originator_claim` value
 ///   is extracted from the verified token and logged.
 /// - **BasicLogOnly**: the client must send HTTP Basic auth, but we
 ///   *don't validate the password*. We just decode the username and log
 ///   it as the originator. Appropriate only for closed networks where the
-///   network itself is the security boundary — the audit trail tells you
+///   network itself is the security boundary - the audit trail tells you
 ///   what a user *claimed* to be, not what they cryptographically proved.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
@@ -90,7 +141,7 @@ pub enum EgressAuthConfig {
         originator_claim: String,
     },
     BasicLogOnly {
-        /// Realm string for the `407` challenge — appears in browser auth
+        /// Realm string for the `407` challenge - appears in browser auth
         /// prompts and curl's prompts.
         realm: String,
     },
@@ -117,7 +168,7 @@ pub struct EgressRuleConfig {
     pub action: EgressAction,
     /// Host patterns: exact (`github.com`) or wildcard subdomain
     /// (`*.github.com`). Matched against the CONNECT target's hostname
-    /// — and, separately, against the SNI when present.
+    /// - and, separately, against the SNI when present.
     #[serde(default)]
     pub hosts: Vec<String>,
     /// CIDR patterns (`192.168.0.0/16`, `2001:db8::/32`) and IP literals.
@@ -144,7 +195,7 @@ pub struct AuthBlockConfig {
     /// Map claims from the verified JWT into headers on the upstream-bound
     /// request. Each mapping is applied after signature verification. The
     /// proxy unconditionally removes the mapped header from the inbound
-    /// request before inserting its value — clients cannot spoof these
+    /// request before inserting its value - clients cannot spoof these
     /// headers by setting them themselves.
     #[serde(default)]
     pub inject_headers: Vec<ClaimHeaderMapping>,
@@ -154,7 +205,7 @@ pub struct AuthBlockConfig {
 pub struct ClaimHeaderMapping {
     /// Top-level claim name in the JWT payload. JWT issuers commonly use
     /// fully-qualified URLs as claim names (e.g.
-    /// `https://example.com/tenant_id`) — those are matched literally, not
+    /// `https://example.com/tenant_id`) - those are matched literally, not
     /// as dotted paths.
     pub claim: String,
     /// HTTP header name to set on the upstream-bound request.
@@ -191,7 +242,7 @@ pub struct TlsConfig {
 }
 
 /// Per-listener defensive timeouts and protocol-level limits. Each field is
-/// optional — unset means "use hyper-util's default", which is usually
+/// optional - unset means "use hyper-util's default", which is usually
 /// permissive. The shipped defaults below tighten where the hyper defaults
 /// are open-ended (header read, h2 concurrency).
 #[derive(Debug, Clone, Deserialize)]
@@ -261,13 +312,13 @@ fn default_ws_idle_timeout_ms() -> u64 {
 pub struct AdminConfig {
     pub bind: SocketAddr,
     /// Optional TLS for the admin listener. If any of the `auth` groups uses
-    /// `mtls`, this MUST be set — mTLS implies the listener itself is TLS.
+    /// `mtls`, this MUST be set - mTLS implies the listener itself is TLS.
     /// If set but no group is mTLS, the listener is plain TLS with no
     /// client-cert requirement.
     #[serde(default)]
     pub tls: Option<AdminTlsConfig>,
     /// Per-endpoint-group auth (read vs write). Defaults to `None` on both,
-    /// leaving the admin listener open — appropriate only behind a trusted
+    /// leaving the admin listener open - appropriate only behind a trusted
     /// network boundary.
     #[serde(default)]
     pub auth: AdminAuthGroups,
@@ -285,7 +336,7 @@ pub struct AdminTlsConfig {
 
 #[derive(Debug, Deserialize, Default)]
 pub struct AdminAuthGroups {
-    /// Auth applied to GET endpoints. Default: `none` — reads are open by
+    /// Auth applied to GET endpoints. Default: `none` - reads are open by
     /// default because they expose the same data as `/metrics`.
     #[serde(default)]
     pub read: AdminAuthConfig,
@@ -298,7 +349,7 @@ pub struct AdminAuthGroups {
 #[derive(Debug, Deserialize, Default)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum AdminAuthConfig {
-    /// No authentication. Default — appropriate for read endpoints behind a
+    /// No authentication. Default - appropriate for read endpoints behind a
     /// trusted network boundary; reckless for write endpoints.
     #[default]
     None,
@@ -308,7 +359,7 @@ pub enum AdminAuthConfig {
         /// Name of the env var containing the token. Read once at startup.
         token_env: String,
     },
-    /// mTLS — client must present a certificate validated against the
+    /// mTLS - client must present a certificate validated against the
     /// admin TLS block's `client_ca_path`. The verified subject DN is
     /// recorded in the audit log as `authn_principal`.
     Mtls,
@@ -318,18 +369,30 @@ pub enum AdminAuthConfig {
 pub struct ShutdownConfig {
     #[serde(default = "default_drain_secs")]
     pub drain_grace_seconds: u64,
+    /// Edge-withdraw grace. On SIGTERM, `/healthz` flips to 503 immediately but
+    /// the proxy keeps accepting for this long *before* the local drain begins,
+    /// giving a perimeter (e.g. Cloudflare) time to notice the 503 and stop
+    /// routing. See `docs/graceful-shutdown.md`. Default: 0 - disabled, so behaviour
+    /// matches a proxy without an edge in front (drain begins immediately).
+    #[serde(default = "default_pre_drain_secs")]
+    pub pre_drain_grace_seconds: u64,
 }
 
 impl Default for ShutdownConfig {
     fn default() -> Self {
         Self {
             drain_grace_seconds: default_drain_secs(),
+            pre_drain_grace_seconds: default_pre_drain_secs(),
         }
     }
 }
 
 fn default_drain_secs() -> u64 {
     30
+}
+
+fn default_pre_drain_secs() -> u64 {
+    0
 }
 
 #[derive(Debug, Deserialize)]
@@ -367,6 +430,10 @@ fn default_log_level() -> String {
 #[derive(Debug, Deserialize)]
 pub struct UpstreamPoolConfig {
     pub name: String,
+    /// Static members. Optional - a NATS-backed pool (`[upstreams.nats]`) omits
+    /// these and is populated at runtime. `validate()` rejects an empty pool
+    /// that has no runtime source.
+    #[serde(default)]
     pub members: Vec<UpstreamMember>,
     #[serde(default)]
     pub balancer: BalancerKind,
@@ -374,13 +441,13 @@ pub struct UpstreamPoolConfig {
     pub tls: UpstreamTlsConfig,
     #[serde(default)]
     pub health: UpstreamHealthConfig,
-    /// HTTP version used on the proxy→upstream connection. Default H1 —
+    /// HTTP version used on the proxy→upstream connection. Default H1 -
     /// universally compatible. Opt into H2 only for backends that you've
     /// verified speak HTTP/2 (e.g. gRPC services). The inbound client's
     /// version is unrelated; quik translates between protocols at the hop.
     #[serde(default)]
     pub http_version: UpstreamHttpVersion,
-    /// Active health checks. Default: disabled — pools without explicit
+    /// Active health checks. Default: disabled - pools without explicit
     /// config stay on passive health only.
     #[serde(default)]
     pub active_health: ActiveHealthConfig,
@@ -390,6 +457,10 @@ pub struct UpstreamPoolConfig {
     /// Connection-pool tuning for the proxy→upstream hyper client.
     #[serde(default)]
     pub pool: UpstreamClientPoolConfig,
+    /// Optional NATS registration binding. When set, this pool is populated
+    /// from a KV subtree at runtime and may start with no static `members`.
+    #[serde(default)]
+    pub nats: Option<UpstreamNatsConfig>,
 }
 
 /// Per-pool tuning of the hyper client's idle connection pool. Defaults
@@ -822,9 +893,68 @@ fn validate(cfg: &Config) -> Result<()> {
             anyhow::bail!("route '{}': strip_prefix must start with '/'", r.summary());
         }
     }
+    // A binary built without the `nats` feature cannot act on NATS config -
+    // fail fast rather than silently leaving NATS-backed pools empty forever.
+    #[cfg(not(feature = "nats"))]
+    {
+        if cfg.nats.is_some() || cfg.upstreams.iter().any(|u| u.nats.is_some()) {
+            anyhow::bail!(
+                "config uses [nats]/[upstreams.nats] but this binary was built \
+                 without the `nats` feature (rebuild with --features nats)"
+            );
+        }
+    }
+    // A pool can only register members if there's a NATS connection to watch.
+    if cfg.upstreams.iter().any(|u| u.nats.is_some()) && cfg.nats.is_none() {
+        anyhow::bail!("[upstreams.nats] is set but the top-level [nats] block is missing");
+    }
+
     for u in &cfg.upstreams {
-        if u.members.is_empty() {
+        // A pool may start empty only if it is populated from NATS at runtime.
+        if u.members.is_empty() && u.nats.is_none() {
             anyhow::bail!("upstream pool '{}' has no members", u.name);
+        }
+        if let Some(n) = &u.nats {
+            if n.subject.trim().is_empty() {
+                anyhow::bail!(
+                    "upstream pool '{}': [upstreams.nats].subject is empty",
+                    u.name
+                );
+            }
+            // Must be a subtree wildcard, not a literal key - otherwise the
+            // watcher silently matches nothing useful (a forgotten `.>`).
+            if !n.subject.ends_with('>') && !n.subject.ends_with('*') {
+                anyhow::bail!(
+                    "upstream pool '{}': [upstreams.nats].subject must end with a wildcard \
+                     token (e.g. 'reg.<ns>.<service>.>'), not a literal key",
+                    u.name
+                );
+            }
+            // ...but a *bare* wildcard ('>' / '.>' / '*') leaves an empty literal
+            // prefix, which matches no key - the pool would silently stay empty.
+            // Require at least one literal token before the wildcard.
+            if n.subject
+                .trim_end_matches(['>', '*'])
+                .trim_end_matches('.')
+                .is_empty()
+            {
+                anyhow::bail!(
+                    "upstream pool '{}': [upstreams.nats].subject needs a literal prefix before \
+                     the wildcard (e.g. 'reg.<ns>.<service>.>'), not a bare '>' or '*'",
+                    u.name
+                );
+            }
+            // HARDENING (allow-list, fail-safe): an empty allow-list would admit any
+            // self-asserted address (SSRF / traffic hijack), so it is rejected at
+            // config load - a NATS pool must state where members may live. Too
+            // strict merely refuses a registration; too loose is a vulnerability.
+            if n.allow_addresses.is_empty() {
+                anyhow::bail!(
+                    "upstream pool '{}': [upstreams.nats].allow_addresses must list at least \
+                     one CIDR or host-suffix - self-registered addresses are otherwise unbounded",
+                    u.name
+                );
+            }
         }
         for m in &u.members {
             if m.scheme != "http" && m.scheme != "https" {
@@ -865,7 +995,7 @@ fn validate(cfg: &Config) -> Result<()> {
     if uses_mtls {
         let Some(tls) = &cfg.admin.tls else {
             anyhow::bail!(
-                "admin.auth uses mtls but [admin.tls] is not configured — mTLS requires TLS"
+                "admin.auth uses mtls but [admin.tls] is not configured - mTLS requires TLS"
             );
         };
         if tls.client_ca_path.is_none() {

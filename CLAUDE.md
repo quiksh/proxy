@@ -24,7 +24,8 @@ make ci           # fmt-check + lint + test — run this before pushing
 make bench        # criterion benchmarks (benches/hot_path.rs)
 ```
 
-- Toolchain: **Rust 1.85+**, edition 2024. No system deps beyond a C linker.
+- Toolchain: **Rust 1.88+**, edition 2024 (dependency floor; CI + the release
+  image build on current stable). No system deps beyond a C linker.
 - Lints are warnings in `Cargo.toml` but **`make lint` treats them as errors
   (`-D warnings`)** — CI will fail on any clippy warning. Run `make check`
   before declaring work done.

@@ -1,3 +1,7 @@
+[workspace]
+# The proxy (root package) plus the optional service-registration sidecar agent.
+members = ["quik-register"]
+
 [package]
 name = "quik"
 # Release version is managed by git tags / the Release workflow, not here.
@@ -50,7 +54,30 @@ base64 = "0.22"
 # Admin API: sha2 for cert fingerprint in audit log (mTLS principal).
 sha2 = "0.10"
 
+# Optional NATS service-registration watcher (behind the `nats` feature). The
+# default build links none of this. `kv`/`jetstream` for the registry;
+# `server_2_11` enables per-key TTL. Trim further once the feature set settles.
+async-nats = { version = "0.49", optional = true, default-features = false, features = [
+    "ring",
+    "jetstream",
+    "kv",
+    "nkeys",        # credentials_file (JWT/.creds auth)
+    "server_2_10",  # watch_many
+    "server_2_11",  # per-key TTL
+] }
+# `StreamExt` for the KV watch/keys streams. Optional, only under `nats`.
+futures = { version = "0.3", optional = true }
+
+[features]
+# First-class but optional NATS-backed service registration. Without it (the
+# default), membership comes from config + the admin API only — zero NATS dep.
+nats = ["dep:async-nats", "dep:futures"]
+
 [dev-dependencies]
+# test-util enables `#[tokio::test(start_paused = true)]` for deterministic
+# virtual-time tests (e.g. the shutdown phase sequencer). Unioned with the
+# normal tokio "full" dependency for test/bench builds only.
+tokio = { version = "1.40", features = ["full", "test-util"] }
 rcgen = "0.13"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "http2", "stream", "json"] }
 criterion = { version = "0.5", features = ["html_reports"] }

@@ -1,0 +1,22 @@
+# quik-register config for the AUTHENTICATED homelab stack. Same as the shared
+# examples/nats/quik-register.toml, but presents the `register` project-key
+# credential (auth/register.creds) - scoped to publish reg.shop.* only.
+
+[nats]
+url        = "${NATS_URL:-nats://nats:4222}"
+bucket     = "${BUCKET:-quik_registrations}"
+creds_file = "/etc/quik-register/nats.creds"   # the `register` project key
+
+[service]
+namespace = "${NAMESPACE:-shop}"
+service   = "${SERVICE:-checkout}"
+instance  = "${INSTANCE}"
+address   = "${ADDR}"
+scheme    = "http"
+
+[liveness]
+protocol            = "http"
+endpoint            = "/healthz?source=container"
+interval_secs       = 5
+unhealthy_threshold = 2
+startup_grace_secs  = 10

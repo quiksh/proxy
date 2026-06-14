@@ -35,7 +35,7 @@ async fn spawn_egress(rules: Vec<EgressRuleConfig>, default: EgressAction) -> st
         auth: None,
     };
     let policy = Arc::new(EgressPolicy::from_config(&cfg).expect("compile policy"));
-    let shutdown = Coordinator::new(2);
+    let shutdown = Coordinator::new(2, 0);
 
     tokio::spawn(quik::egress::serve(listener, policy, shutdown));
     addr
@@ -173,7 +173,7 @@ async fn egress_basic_log_only_requires_proxy_authorization() {
     let policy = Arc::new(
         EgressPolicy::from_config_with_auth(&cfg, &quik::auth::AuthRegistry::empty()).unwrap(),
     );
-    let shutdown = Coordinator::new(2);
+    let shutdown = Coordinator::new(2, 0);
     tokio::spawn(quik::egress::serve(listener, policy, shutdown));
 
     // No Proxy-Authorization → 407 challenge.

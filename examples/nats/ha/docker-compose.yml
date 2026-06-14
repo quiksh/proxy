@@ -1,0 +1,91 @@
+# HA NATS service-registration demo: a 3-node JetStream cluster + two quik
+# instances watching the same replicated bucket. Both quik converge on the same
+# membership; put a load balancer / DNS round-robin in front of :8443a/:8443b.
+#
+#   ../../../scripts/gen-dev-cert.sh
+#   docker compose -f examples/nats/ha/docker-compose.yml up -d --build
+#
+# Try: `docker compose ... stop nats-1` - the cluster keeps serving, both quik
+# stay converged (R3 bucket). Stop a backend - it drains out of both quik.
+name: quik-nats-ha
+
+x-nats: &nats
+  image: nats:2.11
+  command: ["-c", "/etc/nats/nats.conf"]
+  volumes:
+    - ./nats-cluster.conf:/etc/nats/nats.conf:ro
+
+x-backend: &backend
+  build: { context: ../../.., dockerfile: examples/nats/Dockerfile.echo }
+  environment: { BIND_ADDR: "0.0.0.0:8080" }
+
+x-registrar: &registrar
+  image: quik-register:demo
+  build: { context: ../../.., dockerfile: quik-register/Dockerfile }
+  volumes: ["../quik-register.toml:/etc/quik-register/quik-register.toml:ro"]
+
+services:
+  nats-1: { <<: *nats }
+  nats-2: { <<: *nats }
+  nats-3: { <<: *nats }
+
+  # Wait for the cluster to elect a JetStream meta-leader, then create the
+  # 3-replica bucket.
+  nats-setup:
+    image: natsio/nats-box
+    depends_on: [nats-1, nats-2, nats-3]
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        sleep 5;
+        for i in 1 2 3 4 5; do
+          nats -s nats://nats-1:4222,nats://nats-2:4222,nats://nats-3:4222
+            kv add quik_registrations --replicas 3 --ttl=30s --history=1 && exit 0;
+          sleep 3;
+        done; echo "bucket create failed" >&2; exit 1
+
+  quik-a:
+    build: { context: ../../.., dockerfile: examples/nats/Dockerfile.quik }
+    depends_on: [nats-setup]
+    volumes:
+      - ./quik.toml:/etc/quik/config.toml:ro
+      - ../../../tls:/tls:ro
+    ports: ["8443:8443", "9090:9090"]
+  quik-b:
+    build: { context: ../../.., dockerfile: examples/nats/Dockerfile.quik }
+    depends_on: [nats-setup]
+    volumes:
+      - ./quik.toml:/etc/quik/config.toml:ro
+      - ../../../tls:/tls:ro
+    ports: ["8444:8443", "9091:9090"]
+
+  checkout-1:
+    <<: *backend
+    environment: { BIND_ADDR: "0.0.0.0:8080", BACKEND_NAME: checkout-1 }
+    networks:
+      default: { aliases: ["checkout-1.svc"] }
+  checkout-1-reg:
+    <<: *registrar
+    depends_on: [nats-setup, checkout-1]
+    environment:
+      NATS_URL: nats://nats-1:4222,nats://nats-2:4222,nats://nats-3:4222
+      NAMESPACE: shop
+      SERVICE: checkout
+      INSTANCE: checkout-1
+      ADDR: "checkout-1.svc:8080"
+
+  checkout-2:
+    <<: *backend
+    environment: { BIND_ADDR: "0.0.0.0:8080", BACKEND_NAME: checkout-2 }
+    networks:
+      default: { aliases: ["checkout-2.svc"] }
+  checkout-2-reg:
+    <<: *registrar
+    depends_on: [nats-setup, checkout-2]
+    environment:
+      NATS_URL: nats://nats-1:4222,nats://nats-2:4222,nats://nats-3:4222
+      NAMESPACE: shop
+      SERVICE: checkout
+      INSTANCE: checkout-2
+      ADDR: "checkout-2.svc:8080"

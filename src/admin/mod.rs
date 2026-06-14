@@ -267,7 +267,10 @@ async fn handle_admin(
     // Unauthenticated read endpoints — open by design.
     match (req.method(), path) {
         (&Method::GET, "/healthz") | (&Method::GET, "/health") => {
-            return if shutdown.is_draining() {
+            // 503 across both the pre-drain (edge-withdraw) and drain phases,
+            // so a perimeter health check withdraws traffic as soon as
+            // shutdown begins — before the listener actually stops accepting.
+            return if shutdown.is_health_draining() {
                 plain_response(StatusCode::SERVICE_UNAVAILABLE, "draining\n")
             } else {
                 plain_response(StatusCode::OK, "ok\n")

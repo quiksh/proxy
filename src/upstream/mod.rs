@@ -54,12 +54,15 @@ use rustls::{DigitallySignedStruct, SignatureScheme};
 
 pub mod balance;
 pub mod drain;
+#[cfg(feature = "nats")]
+pub mod nats;
 pub mod probe;
 pub mod state;
 
 use crate::config::{
     ActiveHealthConfig, BalancerKind, Config, DrainConfig, InitialActiveState,
-    UpstreamHealthConfig, UpstreamHttpVersion, UpstreamMember, UpstreamPoolConfig,
+    UpstreamHealthConfig, UpstreamHttpVersion, UpstreamMember, UpstreamNatsConfig,
+    UpstreamPoolConfig,
 };
 use balance::Balancer;
 
@@ -186,6 +189,10 @@ pub enum MemberSource {
     /// Added at runtime via the admin API. Lost on restart unless the
     /// operator copies the snapshot back into the config file.
     Runtime,
+    /// Reconciled from the NATS registration bucket by the watcher. Owned by
+    /// the watcher — only it may remove these; config/runtime members are never
+    /// touched by reconciliation.
+    Nats,
 }
 
 impl MemberSource {
@@ -193,6 +200,7 @@ impl MemberSource {
         match self {
             MemberSource::Config => "config",
             MemberSource::Runtime => "runtime",
+            MemberSource::Nats => "nats",
         }
     }
 }
@@ -381,6 +389,9 @@ pub struct UpstreamPoolEntry {
     /// Balancer name in human form, used for the admin API responses
     /// (the `balancer: Box<dyn Balancer>` field can't be downcast cheaply).
     pub balancer_name: BalancerKind,
+    /// Per-pool NATS registration binding (subject + allow-list + caps), if the
+    /// pool is NATS-backed. Read by the watcher; `None` for static pools.
+    pub nats_cfg: Option<UpstreamNatsConfig>,
 }
 
 impl UpstreamPoolEntry {
@@ -532,6 +543,7 @@ fn build_pools(cfg: &Config) -> Result<HashMap<String, Arc<UpstreamPoolEntry>>> 
                 drain_cfg: u.drain.clone(),
                 health_cfg: u.health.clone(),
                 balancer_name: u.balancer,
+                nats_cfg: u.nats.clone(),
             }),
         );
     }

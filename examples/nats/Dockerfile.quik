@@ -1,0 +1,14 @@
+# quik built with the `nats` feature. Build context is the repo root:
+#   docker build -f examples/nats/Dockerfile.quik -t quik:nats .
+# The only difference from the default image is `--features nats`.
+# current stable; deps need > 1.85. bookworm matches the runtime glibc
+FROM rust:1-slim-bookworm AS build
+WORKDIR /src
+COPY . .
+RUN cargo build --release --features nats
+
+FROM debian:bookworm-slim
+RUN useradd -r -s /usr/sbin/nologin quik
+COPY --from=build /src/target/release/quik /usr/local/bin/quik
+USER quik
+ENTRYPOINT ["quik", "--config", "/etc/quik/config.toml"]

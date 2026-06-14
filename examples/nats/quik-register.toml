@@ -1,0 +1,41 @@
+# Sample quik-register config, shared by both demos. Per-instance fields are
+# env-templated so one file serves every replica (each registrar container sets
+# INSTANCE + ADDR). `${VAR:-default}` falls back when the var is unset.
+
+[nats]
+url    = "${NATS_URL:-nats://nats:4222}"
+bucket = "${BUCKET:-quik_registrations}"
+# creds_file = "/etc/quik-register/nats.creds"   # decentralised-JWT; use tls:// url
+
+[service]
+namespace = "${NAMESPACE:-shop}"
+service   = "${SERVICE:-checkout}"
+instance  = "${INSTANCE}"          # unique per replica
+address   = "${ADDR}"              # what quik routes to, e.g. checkout-1.svc:8080
+scheme    = "http"
+# weight  = 1
+# metadata = { zone = "rack-2", version = "v1" }
+
+# The lease (key TTL) is the BUCKET's max-age (nats kv add --ttl) - one global
+# setting the sidecar reads at startup, not something it sets. It derives a
+# heartbeat capped at TTL/3 from it, so the key never lapses; no config here.
+
+# The liveness gate: decides whether this instance should STAY in the registry,
+# not whether traffic should route to it. Point it at a liveness/container
+# endpoint, distinct from the routing health-check quik runs itself
+# ([upstreams.active_health]). The lease is refreshed only while this passes.
+[liveness]
+# Set false in a shared-fate topology (sidecar in the same Pod/task, or bundled
+# in one container): the heartbeat then runs unconditionally and deregistration
+# relies on process death + the lease TTL. Leave true (default) for a standalone
+# registrar - there the probe is the only thing that detects instance death - or
+# as an extra layer that also catches an alive-but-wedged instance.
+enabled             = true
+protocol            = "http"                    # http | https | tcp
+endpoint            = "/healthz?source=container"
+method              = "GET"
+timeout_ms          = 2000
+interval_secs       = 5            # probe + heartbeat cadence (auto-capped at bucket TTL/3)
+healthy_threshold   = 1            # consecutive OK before (re)registering
+unhealthy_threshold = 2            # consecutive fails before deregistering
+startup_grace_secs  = 10           # warm-up window: failures don't deregister

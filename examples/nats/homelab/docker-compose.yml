@@ -1,0 +1,121 @@
+# Homelab single-node NATS service-registration demo - AUTHENTICATED (default).
+#
+#   ../../../scripts/gen-dev-cert.sh        # once: TLS cert into ../../../tls
+#   docker compose -f examples/nats/homelab/docker-compose.yml up -d --build
+#
+# NATS runs decentralised JWT: every kv put presents a credential scoped to
+# exactly the subjects it may touch (auth/README.md). The backends register with
+# the `register` project key (reg.shop.* only); quik watches with its own creds.
+# Throwaway demo creds are GENERATED into auth/ on first `up` (the creds-init
+# step below) - no private keys are committed. They're git-ignored and rebuilt if
+# missing; see auth/README.md. For the open (no-auth) minimal demo, use
+# docker-compose.no-auth.yml instead.
+#
+# Two backends self-register; quik routes to whichever are healthy. Try: stop
+# checkout-1 and watch it drain out of the pool.
+name: quik-nats-homelab
+
+services:
+  # One-shot: mint the throwaway demo creds + server.conf into ./auth on first
+  # run (idempotent - skipped if already present). Keeps private keys out of the
+  # repo while still coming up in one command. Delete auth/*.creds to rotate.
+  creds-init:
+    image: natsio/nats-box
+    restart: "no"
+    working_dir: /auth
+    volumes: ["./auth:/auth"]
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["[ -f server.conf ] || sh gen-demo-creds.sh"]
+
+  nats:
+    image: nats:2.11
+    depends_on:
+      creds-init: { condition: service_completed_successfully }
+    command: ["-c", "/etc/nats/server.conf"]
+    volumes:
+      - ./auth/server.conf:/etc/nats/server.conf:ro   # operator + mem-resolver + JetStream
+      - nats-data:/data
+    ports: ["127.0.0.1:4222:4222", "127.0.0.1:8222:8222"]  # loopback only
+
+  # One-shot: create the TTL+history bucket, using the full-account admin creds.
+  nats-setup:
+    image: natsio/nats-box
+    depends_on:
+      nats: { condition: service_started }
+      creds-init: { condition: service_completed_successfully }
+    restart: "no"
+    volumes: ["./auth/admin.creds:/creds/admin.creds:ro"]
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["nats -s nats:4222 --creds /creds/admin.creds kv add quik_registrations --ttl=30s --history=1 || true"]
+
+  quik:
+    build:
+      context: ../../..
+      dockerfile: examples/nats/Dockerfile.quik
+    depends_on:
+      nats-setup: { condition: service_completed_successfully }
+      creds-init: { condition: service_completed_successfully }
+    volumes:
+      - ./quik.auth.toml:/etc/quik/config.toml:ro
+      - ./auth/quik.creds:/etc/quik/nats.creds:ro
+      - ../../../tls:/tls:ro
+    ports: ["8443:8443", "9090:9090"]
+
+  checkout-1:
+    # Tag the built image so provision.sh can start more backends from it.
+    image: quik-echo:demo
+    build: { context: ../../.., dockerfile: examples/nats/Dockerfile.echo }
+    environment: { BIND_ADDR: "0.0.0.0:8080", BACKEND_NAME: checkout-1 }
+    networks:
+      default: { aliases: ["checkout-1.svc"] }
+  checkout-1-reg:
+    # The quik-register agent: liveness-gated registration with the project key.
+    # Tag it so provision.sh can start registrars for ad-hoc backends.
+    image: quik-register:demo
+    build: { context: ../../.., dockerfile: quik-register/Dockerfile }
+    depends_on:
+      nats-setup: { condition: service_completed_successfully }
+      creds-init: { condition: service_completed_successfully }
+      checkout-1: { condition: service_started }
+    volumes:
+      - ./auth/quik-register.toml:/etc/quik-register/quik-register.toml:ro
+      - ./auth/register.creds:/etc/quik-register/nats.creds:ro
+    environment:
+      INSTANCE: checkout-1
+      ADDR: "checkout-1.svc:8080"
+
+  checkout-2:
+    image: quik-echo:demo
+    build: { context: ../../.., dockerfile: examples/nats/Dockerfile.echo }
+    environment: { BIND_ADDR: "0.0.0.0:8080", BACKEND_NAME: checkout-2 }
+    networks:
+      default: { aliases: ["checkout-2.svc"] }
+  checkout-2-reg:
+    image: quik-register:demo
+    build: { context: ../../.., dockerfile: quik-register/Dockerfile }
+    depends_on:
+      nats-setup: { condition: service_completed_successfully }
+      creds-init: { condition: service_completed_successfully }
+      checkout-2: { condition: service_started }
+    volumes:
+      - ./auth/quik-register.toml:/etc/quik-register/quik-register.toml:ro
+      - ./auth/register.creds:/etc/quik-register/nats.creds:ro
+    environment:
+      INSTANCE: checkout-2
+      ADDR: "checkout-2.svc:8080"
+
+  # Optional GUI for browsing the KV bucket - `--profile ui up`, then open
+  # http://localhost:31311 and add a connection to nats://nats:4222 (paste
+  # auth/admin.creds for the authenticated stack). The "DataGrip for NATS".
+  nui:
+    image: ghcr.io/nats-nui/nui:latest
+    profiles: ["ui"]
+    ports: ["127.0.0.1:31311:31311"]
+
+volumes:
+  nats-data: {}
+
+# Explicit network name so provision.sh can attach ad-hoc backends to it.
+networks:
+  default:
+    name: quik-nats

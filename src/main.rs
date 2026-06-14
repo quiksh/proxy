@@ -42,7 +42,10 @@ async fn main() -> Result<()> {
         "quik starting"
     );
 
-    let shutdown = shutdown::Coordinator::new(cfg.shutdown.drain_grace_seconds);
+    let shutdown = shutdown::Coordinator::new(
+        cfg.shutdown.drain_grace_seconds,
+        cfg.shutdown.pre_drain_grace_seconds,
+    );
     shutdown.install_signal_handlers();
 
     let routing = Arc::new(routing::SharedRoutingTable::from_config(&cfg)?);
@@ -56,6 +59,18 @@ async fn main() -> Result<()> {
         std::time::Duration::from_secs(5),
         shutdown.clone(),
     ));
+
+    // NATS service-registration watcher (feature `nats`). Spawned only when a
+    // `[nats]` block is present; pools serve their static config until it
+    // connects, and keep last-known membership if it drops.
+    #[cfg(feature = "nats")]
+    if let Some(nats_cfg) = cfg.nats.clone() {
+        tokio::spawn(upstream::nats::run_watcher(
+            upstreams.clone(),
+            nats_cfg,
+            shutdown.clone(),
+        ));
+    }
 
     // One active-health probe task per pool that opted in. Pools without
     // `[upstreams.active_health].enabled = true` get nothing spawned and
