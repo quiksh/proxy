@@ -1,0 +1,48 @@
+# Run quik locally against the homelab config, in front of the real
+# Proxmox / Plex / TrueNAS backends on your LAN.
+#
+# This runs ONLY quik - it does not stand up fake backends. The upstream
+# addresses in config/homelab.toml (192.168.177.x) must be reachable from
+# this host; outbound traffic from the container routes through the host's
+# normal LAN connectivity, so no special network mode is needed.
+#
+# Prerequisites
+#   1. A TLS cert/key in ./tls. For the *.internal hostnames the homelab
+#      config uses, generate one with matching SANs:
+#         ./scripts/run-homelab.sh   # generates ./tls + runs the binary; Ctrl-C
+#      or, for a quick localhost-only cert:
+#         ./scripts/gen-dev-cert.sh
+#   2. The backend IPs in config/homelab.toml are reachable from this host.
+#
+# Usage
+#   docker compose -f docker-compose.homelab.yml up --build
+#
+#   # from another shell (‑k because the cert is self-signed):
+#   curl -k --resolve proxmox.internal:8443:127.0.0.1 https://proxmox.internal:8443/
+#   curl -k --resolve plex.internal:8443:127.0.0.1    https://plex.internal:8443/
+#   curl -k --resolve truenas.internal:8443:127.0.0.1 https://truenas.internal:8443/
+#
+#   # or add the names to /etc/hosts for browser use:
+#   sudo sh -c 'echo "127.0.0.1 proxmox.internal plex.internal truenas.internal" >> /etc/hosts'
+
+services:
+  quik:
+    build:
+      context: .
+      target: quik-runtime
+    image: quik:homelab
+    container_name: quik-homelab
+    restart: unless-stopped
+    ports:
+      - "8443:8443" # inbound reverse-proxy listener (TLS)
+      # The admin listener stays on 127.0.0.1:9090 *inside* the container,
+      # exactly as config/homelab.toml declares it - so /metrics and /healthz
+      # are not published to the host. To reach them:
+      #   docker exec quik-homelab /usr/local/bin/quik --help   # (no curl in image)
+      # Easiest is to scrape from a sidecar on the same compose network, or
+      # set admin.bind = "0.0.0.0:9090" in the config and publish 9090 here.
+    volumes:
+      # config/homelab.toml's relative `./tls/cert.pem` resolves against the
+      # image WORKDIR (/etc/quik), so the cert dir must land at /etc/quik/tls.
+      - ./config/homelab.toml:/etc/quik/quik.toml:ro
+      - ./tls:/etc/quik/tls:ro
