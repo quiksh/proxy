@@ -31,7 +31,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use bytes::Bytes;
-use http::header::{CONTENT_LENGTH, HOST};
+use http::HeaderMap;
+use http::header::{CONTENT_LENGTH, HOST, HeaderName, USER_AGENT};
 use http::uri::{Parts as UriParts, PathAndQuery};
 use http::{Request, Response, StatusCode, Uri};
 use http_body_util::{BodyExt, Full, Limited};
@@ -61,6 +62,33 @@ pub struct RequestContext {
     pub peer: SocketAddr,
     pub mode: Mode,
     pub forwarded: Arc<ForwardedPolicy>,
+    /// Optional request-derived access-log fields (`client_ip`, `user_agent`).
+    pub access: Arc<AccessLogFields>,
+}
+
+/// Opt-in access-log fields derived from request headers. Field names are
+/// fixed (so they're directly queryable); only the source / on-off is config.
+/// All-off (the default) does no per-request work.
+#[derive(Clone, Default)]
+pub struct AccessLogFields {
+    /// Source header for the `client_ip` field (e.g. `cf-connecting-ip`).
+    pub client_ip_header: Option<HeaderName>,
+    /// Emit the `user_agent` field from the `User-Agent` header.
+    pub user_agent: bool,
+}
+
+impl AccessLogFields {
+    pub fn from_logging(cfg: &crate::config::LoggingConfig) -> Result<Self> {
+        Ok(Self {
+            client_ip_header: cfg.parsed_client_ip_header()?,
+            user_agent: cfg.user_agent,
+        })
+    }
+
+    /// True when nothing is configured, so the request path can skip the work.
+    fn is_noop(&self) -> bool {
+        self.client_ip_header.is_none() && !self.user_agent
+    }
 }
 
 /// Shared context required by the WebSocket upgrade path. Carries the bits
@@ -81,6 +109,8 @@ pub struct ServerState {
     pub mode: Mode,
     /// Forwarding-header policy (trusted proxies + RFC 7239 emit toggle).
     pub forwarded: Arc<ForwardedPolicy>,
+    /// Opt-in request-derived access-log fields (`[logging]`).
+    pub access: Arc<AccessLogFields>,
     /// Defensive timeouts + protocol-level limits applied to every inbound
     /// connection. Cloned cheaply (small POD).
     pub limits: Arc<crate::config::ListenerLimitsConfig>,
@@ -149,6 +179,7 @@ async fn handle_connection(
         peer,
         mode: state.mode,
         forwarded: state.forwarded.clone(),
+        access: state.access.clone(),
     };
     let tls_start = Instant::now();
     let tls_stream = match tls.accept(tcp).await {
@@ -249,6 +280,8 @@ async fn forward(
         path = %path,
         peer = %ctx.peer,
         request_id = tracing::field::Empty,
+        client_ip = tracing::field::Empty,
+        user_agent = tracing::field::Empty,
     );
     forward_inner(req, routing, upstreams, auth, ctx, ws_ctx)
         .instrument(span)
@@ -278,6 +311,13 @@ async fn forward_inner(
     // downstream log event (including the 404 early-return path).
     let request_id = ensure_request_id(&mut parts.headers);
     tracing::Span::current().record("request_id", request_id.as_str());
+
+    // Attach opt-in access-log fields to the span so they ride every event
+    // below (success and terminal/404 paths alike). Skipped entirely when
+    // nothing is configured, so the default path does no extra work.
+    if !ctx.access.is_noop() {
+        record_access_fields(&parts.headers, &ctx.access);
+    }
 
     let host = parts
         .headers
@@ -621,6 +661,38 @@ fn fire_failure(health: &crate::upstream::UpstreamHealth, pool_name: &str, membe
     }
 }
 
+/// Extract the opt-in access-log field values from a request's headers. Each
+/// is `Some` only when configured and present (and a valid header string).
+/// Pure, so it's unit-testable without a tracing subscriber.
+fn access_field_values<'a>(
+    headers: &'a HeaderMap,
+    fields: &AccessLogFields,
+) -> (Option<&'a str>, Option<&'a str>) {
+    let client_ip = fields
+        .client_ip_header
+        .as_ref()
+        .and_then(|name| headers.get(name))
+        .and_then(|v| v.to_str().ok());
+    let user_agent = fields
+        .user_agent
+        .then(|| headers.get(USER_AGENT).and_then(|v| v.to_str().ok()))
+        .flatten();
+    (client_ip, user_agent)
+}
+
+/// Record the configured access-log fields onto the current span so they ride
+/// the `quik::access` event (success and terminal paths alike).
+fn record_access_fields(headers: &HeaderMap, fields: &AccessLogFields) {
+    let (client_ip, user_agent) = access_field_values(headers, fields);
+    let span = tracing::Span::current();
+    if let Some(ip) = client_ip {
+        span.record("client_ip", ip);
+    }
+    if let Some(ua) = user_agent {
+        span.record("user_agent", ua);
+    }
+}
+
 fn record_terminal(route: &Arc<str>, status: u16, start: Instant, upstream: Option<&str>) {
     let duration = start.elapsed();
     metrics::counter!("quik_requests_total",
@@ -751,6 +823,9 @@ async fn handle_ws_upgrade(
     // the access log.
     let request_id = ensure_request_id(req.headers_mut());
     tracing::Span::current().record("request_id", request_id.as_str());
+    if !ctx.access.is_noop() {
+        record_access_fields(req.headers(), &ctx.access);
+    }
 
     let host = req
         .headers()
@@ -987,4 +1062,50 @@ fn synth(status: StatusCode, msg: &'static str) -> Response<ProxyBody> {
         .header(http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
         .body(body)
         .expect("static response builds")
+}
+
+#[cfg(test)]
+mod access_fields_tests {
+    use super::{AccessLogFields, access_field_values};
+    use http::HeaderMap;
+
+    fn fields(client_ip_header: Option<&str>, user_agent: bool) -> AccessLogFields {
+        AccessLogFields {
+            client_ip_header: client_ip_header.map(|s| s.parse().unwrap()),
+            user_agent,
+        }
+    }
+
+    #[test]
+    fn noop_when_nothing_configured() {
+        assert!(fields(None, false).is_noop());
+        assert!(!fields(Some("cf-connecting-ip"), false).is_noop());
+        assert!(!fields(None, true).is_noop());
+    }
+
+    #[test]
+    fn extracts_client_ip_from_configured_header() {
+        let mut h = HeaderMap::new();
+        h.insert("cf-connecting-ip", "203.0.113.7".parse().unwrap());
+        let (ip, ua) = access_field_values(&h, &fields(Some("cf-connecting-ip"), false));
+        assert_eq!(ip, Some("203.0.113.7"));
+        assert_eq!(ua, None);
+    }
+
+    #[test]
+    fn client_ip_none_when_header_absent() {
+        let h = HeaderMap::new();
+        let (ip, _) = access_field_values(&h, &fields(Some("cf-connecting-ip"), false));
+        assert_eq!(ip, None);
+    }
+
+    #[test]
+    fn user_agent_only_when_enabled() {
+        let mut h = HeaderMap::new();
+        h.insert("user-agent", "curl/8".parse().unwrap());
+        let (_, off) = access_field_values(&h, &fields(None, false));
+        assert_eq!(off, None);
+        let (_, on) = access_field_values(&h, &fields(None, true));
+        assert_eq!(on, Some("curl/8"));
+    }
 }

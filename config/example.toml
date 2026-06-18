@@ -60,6 +60,12 @@ level  = "info,quik=info"
 # key_value: human-readable single-line with `field=value` pairs after a
 #   `<ts> <level> <target>:` prefix.
 format = "json"
+# Opt-in access-log fields. Both off by default and cost nothing.
+# client_ip_header: source header for the `client_ip` field - behind a CDN this
+#   is where the real client address lives (cf-connecting-ip for Cloudflare).
+# user_agent: emit the `user_agent` field from the User-Agent header.
+# client_ip_header = "cf-connecting-ip"
+# user_agent       = true
 
 [[upstreams]]
 name = "users-api"

@@ -426,6 +426,31 @@ pub struct LoggingConfig {
     /// `field=value` pairs. Default: json.
     #[serde(default)]
     pub format: LogFormat,
+    /// Source header for the client IP, emitted as the top-level `client_ip`
+    /// access-log field. Behind a CDN this is where the real client address
+    /// lives (e.g. `cf-connecting-ip` for Cloudflare, `true-client-ip`,
+    /// `x-real-ip`). Unset (default) = not logged. A malformed header name
+    /// fails boot.
+    #[serde(default)]
+    pub client_ip_header: Option<String>,
+    /// Emit the request's `User-Agent` as the top-level `user_agent`
+    /// access-log field. Default: false.
+    #[serde(default)]
+    pub user_agent: bool,
+}
+
+impl LoggingConfig {
+    /// Parse `client_ip_header` into a validated `HeaderName` (None = disabled).
+    /// Errors on a malformed name so misconfiguration is caught at boot.
+    pub fn parsed_client_ip_header(&self) -> Result<Option<http::header::HeaderName>> {
+        self.client_ip_header
+            .as_deref()
+            .map(|h| {
+                h.parse::<http::header::HeaderName>()
+                    .with_context(|| format!("invalid [logging].client_ip_header '{h}'"))
+            })
+            .transpose()
+    }
 }
 
 impl Default for LoggingConfig {
@@ -433,6 +458,8 @@ impl Default for LoggingConfig {
         Self {
             level: default_log_level(),
             format: LogFormat::default(),
+            client_ip_header: None,
+            user_agent: false,
         }
     }
 }
@@ -872,6 +899,10 @@ pub fn expand_env(input: &str) -> Result<String> {
 }
 
 fn validate(cfg: &Config) -> Result<()> {
+    // Fail boot on a malformed [logging].client_ip_header rather than silently
+    // dropping it later.
+    cfg.logging.parsed_client_ip_header()?;
+
     let names: HashSet<&str> = cfg.upstreams.iter().map(|u| u.name.as_str()).collect();
     if names.len() != cfg.upstreams.len() {
         anyhow::bail!("duplicate upstream pool names");
@@ -1059,6 +1090,45 @@ bind = "127.0.0.1:9090"
         assert_eq!(cfg.upstreams.len(), 1);
         assert_eq!(cfg.routes.len(), 1);
         assert_eq!(cfg.shutdown.drain_grace_seconds, 30);
+    }
+
+    #[test]
+    fn accepts_valid_client_ip_header() {
+        let s = format!(
+            "{MIN}\n[logging]\nclient_ip_header=\"cf-connecting-ip\"\nuser_agent=true\n\
+             [[upstreams]]\nname=\"a\"\nmembers=[{{address=\"127.0.0.1:1\"}}]\n\
+             [[routes]]\npath_prefix=\"/x\"\nupstream=\"a\"\n"
+        );
+        let cfg: Config = toml::from_str(&s).unwrap();
+        validate(&cfg).unwrap();
+        assert_eq!(
+            cfg.logging.parsed_client_ip_header().unwrap().unwrap(),
+            "cf-connecting-ip"
+        );
+        assert!(cfg.logging.user_agent);
+    }
+
+    #[test]
+    fn client_ip_header_defaults_off() {
+        let s = format!(
+            "{MIN}\n[[upstreams]]\nname=\"a\"\nmembers=[{{address=\"127.0.0.1:1\"}}]\n\
+             [[routes]]\npath_prefix=\"/x\"\nupstream=\"a\"\n"
+        );
+        let cfg: Config = toml::from_str(&s).unwrap();
+        assert!(cfg.logging.parsed_client_ip_header().unwrap().is_none());
+        assert!(!cfg.logging.user_agent);
+    }
+
+    #[test]
+    fn rejects_malformed_client_ip_header() {
+        let s = format!(
+            "{MIN}\n[logging]\nclient_ip_header=\"bad header\"\n\
+             [[upstreams]]\nname=\"a\"\nmembers=[{{address=\"127.0.0.1:1\"}}]\n\
+             [[routes]]\npath_prefix=\"/x\"\nupstream=\"a\"\n"
+        );
+        let cfg: Config = toml::from_str(&s).unwrap();
+        let err = validate(&cfg).unwrap_err();
+        assert!(err.to_string().contains("client_ip_header"), "{err}");
     }
 
     #[test]
