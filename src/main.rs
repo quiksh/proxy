@@ -121,6 +121,7 @@ async fn main() -> Result<()> {
             auth: auth_registry.clone(),
             mode: cfg.mode,
             forwarded: Arc::new(quik::headers::ForwardedPolicy::from_config(&cfg.forwarded)),
+            access: Arc::new(proxy::AccessLogFields::from_logging(&cfg.logging)?),
             limits: Arc::new(cfg.listener.limits.clone()),
         },
         shutdown.clone(),

@@ -776,6 +776,8 @@ async fn spawn_proxy_full(
         logging: LoggingConfig {
             level: "warn".to_string(),
             format: LogFormat::Json,
+            client_ip_header: None,
+            user_agent: false,
         },
         upstreams,
         routes,
@@ -866,6 +868,10 @@ async fn spawn_proxy_full(
             forwarded: std::sync::Arc::new(quik::headers::ForwardedPolicy::from_config(
                 &cfg.forwarded,
             )),
+            access: std::sync::Arc::new(
+                quik::proxy::AccessLogFields::from_logging(&cfg.logging)
+                    .expect("valid logging config"),
+            ),
             limits: std::sync::Arc::new(cfg.listener.limits.clone()),
         },
         shutdown.clone(),

@@ -158,14 +158,46 @@ pre_drain_grace_seconds = 0
 
 ```toml
 [logging]
-level  = "info,quik=info"
-format = "json"
+level            = "info,quik=info"
+format           = "json"
+client_ip_header = "cf-connecting-ip"
+user_agent       = true
 ```
 
-| Field    | Type                       | Default              | Notes                                          |
-|----------|----------------------------|----------------------|------------------------------------------------|
-| `level`  | RUST_LOG-style env filter  | `"info,quik=info"`   | `RUST_LOG` env overrides if set.               |
-| `format` | `"json"` \| `"key_value"`  | `"json"`             | JSON for shippers, key_value for human eyes.   |
+| Field              | Type                       | Default              | Notes                                          |
+|--------------------|----------------------------|----------------------|------------------------------------------------|
+| `level`            | RUST_LOG-style env filter  | `"info,quik=info"`   | `RUST_LOG` env overrides if set.               |
+| `format`           | `"json"` \| `"key_value"`  | `"json"`             | JSON for shippers, key_value for human eyes.   |
+| `client_ip_header` | header name                | unset (off)          | Source header for the `client_ip` access-log field (see below). |
+| `user_agent`       | bool                       | `false`              | Emit the `user_agent` access-log field from `User-Agent`. |
+
+### Request-derived access-log fields
+
+These add opt-in, directly-queryable fields to each `quik::access` event
+(success and terminal paths alike), instead of a nested blob:
+
+- **`client_ip_header`** names the header carrying the real client address.
+  When set and present, its value is logged as the top-level `client_ip` field.
+  Behind a CDN the originating address lives in a CDN-specific header -
+  `cf-connecting-ip` for Cloudflare, `true-client-ip`, or `x-real-ip`. A
+  malformed header name fails boot.
+- **`user_agent = true`** logs the request's `User-Agent` as the top-level
+  `user_agent` field.
+
+Example access log:
+
+```json
+{"target":"quik::access","status":200,"route":"web","client_ip":"203.0.113.7","user_agent":"curl/8","message":"access"}
+```
+
+Notes:
+
+- **Querying:** because the field names (`client_ip`, `user_agent`) are fixed,
+  they're first-class log fields - no nested JSON to re-parse in your log store.
+- **Cost:** both off (the default) does nothing on the request path. Each field
+  is a single header lookup when enabled.
+- **Security:** values are logged verbatim; these fields are for non-sensitive
+  operational headers only.
 
 ## `[[upstreams]]`
 
