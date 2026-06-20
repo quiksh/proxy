@@ -4,10 +4,13 @@
 //! - **Hop-by-hop stripping** ([`strip_hop_by_hop`]) per RFC 7230 §6.1, plus
 //!   any header name listed inside the `Connection` header itself.
 //! - **Identity headers** ([`ensure_request_id`], [`ensure_traceparent`])
-//!   pass through inbound values when valid, otherwise generate fresh ones.
-//!   IDs are CSPRNG-backed (`getrandom::fill`) - same cost as a non-CSPRNG
-//!   on modern OSes and removes any "what if this leaks into an
-//!   authorisation context" footgun.
+//!   pass an inbound value through only from a *trusted* peer (same trust
+//!   decision as the forwarding headers below); from an untrusted edge client
+//!   the inbound value is discarded and a fresh one generated, so a client
+//!   can't pin/forge the correlation id or force trace sampling. IDs are
+//!   CSPRNG-backed (`getrandom::fill`) - same cost as a non-CSPRNG on modern
+//!   OSes and removes any "what if this leaks into an authorisation context"
+//!   footgun.
 //! - **`X-Forwarded-*` injection.** Whether the inbound chain is trusted is
 //!   decided by [`ForwardedPolicy`]:
 //!   - untrusted peer (the default in [`Mode::Edge`]): inbound XFF is ignored
@@ -136,11 +139,14 @@ pub fn valid_traceparent(s: &str) -> bool {
 
 // ── Identity-header injection ────────────────────────────────────────────────
 
-/// Pass through `X-Request-ID` if a non-empty value was supplied, otherwise
-/// generate a fresh one. Returns the final value so the caller can attach it
-/// to log spans.
-pub fn ensure_request_id(headers: &mut HeaderMap) -> String {
-    if let Some(v) = headers.get("x-request-id")
+/// Resolve `X-Request-ID`. From a `trusted` peer a non-empty inbound value is
+/// passed through for end-to-end correlation; otherwise a fresh id is generated
+/// and any inbound value replaced. Gating on trust (the same decision as
+/// `X-Forwarded-For`) stops an untrusted edge client from pinning or forging the
+/// correlation id. Returns the final value so the caller can attach it to spans.
+pub fn ensure_request_id(headers: &mut HeaderMap, trusted: bool) -> String {
+    if trusted
+        && let Some(v) = headers.get("x-request-id")
         && let Ok(s) = v.to_str()
         && !s.is_empty()
     {
@@ -153,10 +159,14 @@ pub fn ensure_request_id(headers: &mut HeaderMap) -> String {
     id
 }
 
-/// Pass through `traceparent` if syntactically valid; otherwise generate a
-/// fresh trace context. Returns the final value.
-pub fn ensure_traceparent(headers: &mut HeaderMap) -> String {
-    if let Some(v) = headers.get("traceparent")
+/// Resolve `traceparent`. From a `trusted` peer a syntactically valid inbound
+/// value is passed through; otherwise a fresh trace context is generated and any
+/// inbound value replaced. Gating on trust stops an untrusted edge client from
+/// pinning a trace-id or forcing sampling via an injected `traceparent`. Returns
+/// the final value.
+pub fn ensure_traceparent(headers: &mut HeaderMap, trusted: bool) -> String {
+    if trusted
+        && let Some(v) = headers.get("traceparent")
         && let Ok(s) = v.to_str()
         && valid_traceparent(s)
     {
@@ -429,18 +439,53 @@ mod tests {
     }
 
     #[test]
-    fn ensure_request_id_passes_through_existing() {
+    fn ensure_request_id_trusted_passes_through_existing() {
         let mut h = HeaderMap::new();
         h.insert("x-request-id", HeaderValue::from_static("abc-123"));
-        assert_eq!(ensure_request_id(&mut h), "abc-123");
+        assert_eq!(ensure_request_id(&mut h, true), "abc-123");
+    }
+
+    #[test]
+    fn ensure_request_id_untrusted_replaces_inbound() {
+        // An untrusted edge client can't pin the correlation id: the inbound
+        // value is discarded and a fresh one generated + written.
+        let mut h = HeaderMap::new();
+        h.insert("x-request-id", HeaderValue::from_static("attacker-pinned"));
+        let id = ensure_request_id(&mut h, false);
+        assert_ne!(id, "attacker-pinned");
+        assert_eq!(id.len(), 36);
+        assert_eq!(h.get("x-request-id").unwrap(), id.as_str());
     }
 
     #[test]
     fn ensure_request_id_generates_when_absent() {
+        // Trust is irrelevant when there's nothing inbound to honour.
+        for trusted in [true, false] {
+            let mut h = HeaderMap::new();
+            let id = ensure_request_id(&mut h, trusted);
+            assert_eq!(id.len(), 36);
+            assert_eq!(h.get("x-request-id").unwrap(), id.as_str());
+        }
+    }
+
+    #[test]
+    fn ensure_traceparent_trusted_passes_valid_through() {
+        let valid = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
         let mut h = HeaderMap::new();
-        let id = ensure_request_id(&mut h);
-        assert_eq!(id.len(), 36);
-        assert_eq!(h.get("x-request-id").unwrap(), id.as_str());
+        h.insert("traceparent", HeaderValue::from_static(valid));
+        assert_eq!(ensure_traceparent(&mut h, true), valid);
+    }
+
+    #[test]
+    fn ensure_traceparent_untrusted_replaces_inbound() {
+        // Stops an untrusted client pinning a trace-id or forcing sampling.
+        let injected = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+        let mut h = HeaderMap::new();
+        h.insert("traceparent", HeaderValue::from_static(injected));
+        let tp = ensure_traceparent(&mut h, false);
+        assert_ne!(tp, injected);
+        assert!(valid_traceparent(&tp));
+        assert_eq!(h.get("traceparent").unwrap(), tp.as_str());
     }
 
     #[test]

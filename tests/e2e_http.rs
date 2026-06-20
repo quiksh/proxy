@@ -1414,12 +1414,51 @@ async fn x_forwarded_proto_and_host_are_set() {
 }
 
 #[tokio::test]
-async fn request_id_passthrough_when_supplied() {
+async fn request_id_replaced_for_untrusted_edge_client() {
+    // Default edge mode: a loopback client is untrusted, so its supplied
+    // x-request-id is discarded and a fresh one generated (no correlation
+    // poisoning from the open internet).
     let backend = Backend::spawn("a").await;
     let proxy = spawn_proxy(ProxySpec {
         pools: vec![common::Backends::http("p", vec![backend.addr])],
         routes: vec![route("/", "p")],
     })
+    .await;
+    let client = https_client_http1_only();
+
+    let _ = client
+        .get(url(proxy.addr, "/x"))
+        .header("x-request-id", "client-supplied-trace-id")
+        .send()
+        .await
+        .expect("send");
+
+    let got = backend.calls()[0]
+        .headers
+        .get("x-request-id")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(
+        got, "client-supplied-trace-id",
+        "untrusted client id must not pass through"
+    );
+    assert_eq!(got.len(), 36, "replaced with a generated UUIDv4: {got}");
+}
+
+#[tokio::test]
+async fn request_id_passthrough_from_trusted_peer() {
+    // host mode trusts the peer, so a supplied id is propagated end-to-end.
+    use quik::config::Mode;
+    let backend = Backend::spawn("a").await;
+    let proxy = common::spawn_proxy_with_mode(
+        ProxySpec {
+            pools: vec![common::Backends::http("p", vec![backend.addr])],
+            routes: vec![route("/", "p")],
+        },
+        Mode::Host,
+    )
     .await;
     let client = https_client_http1_only();
 
@@ -1463,12 +1502,48 @@ async fn request_id_generated_when_absent() {
 }
 
 #[tokio::test]
-async fn traceparent_passthrough_when_valid() {
+async fn traceparent_replaced_for_untrusted_edge_client() {
+    // Default edge mode: a valid-but-untrusted traceparent is regenerated, so a
+    // client can't pin a trace-id or force sampling.
     let backend = Backend::spawn("a").await;
     let proxy = spawn_proxy(ProxySpec {
         pools: vec![common::Backends::http("p", vec![backend.addr])],
         routes: vec![route("/", "p")],
     })
+    .await;
+    let client = https_client_http1_only();
+
+    let supplied = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+    let _ = client
+        .get(url(proxy.addr, "/x"))
+        .header("traceparent", supplied)
+        .send()
+        .await
+        .expect("send");
+
+    assert_ne!(
+        backend.calls()[0]
+            .headers
+            .get("traceparent")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        supplied,
+        "untrusted traceparent must not pass through"
+    );
+}
+
+#[tokio::test]
+async fn traceparent_passthrough_from_trusted_peer() {
+    use quik::config::Mode;
+    let backend = Backend::spawn("a").await;
+    let proxy = common::spawn_proxy_with_mode(
+        ProxySpec {
+            pools: vec![common::Backends::http("p", vec![backend.addr])],
+            routes: vec![route("/", "p")],
+        },
+        Mode::Host,
+    )
     .await;
     let client = https_client_http1_only();
 

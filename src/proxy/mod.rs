@@ -310,9 +310,21 @@ async fn forward_inner(
 
     let (mut parts, body) = req.into_parts();
 
+    // Whether we trust the immediate peer to have set forwarding / identity
+    // headers (host mode, or edge + a trusted_proxies match). Computed up front
+    // because the request-id stamp below depends on it; the two bools are read
+    // in one lock-free load and the guard dropped immediately (no hold across
+    // the upstream await). Reused for the forwarding headers further down.
+    let peer_ip = ctx.peer.ip();
+    let (trusted, emit_forwarded) = {
+        let fp = ctx.forwarded.load();
+        (fp.trusts(peer_ip, ctx.mode), fp.emit)
+    };
+
     // Compute request-id immediately so the span carries it across every
-    // downstream log event (including the 404 early-return path).
-    let request_id = ensure_request_id(&mut parts.headers);
+    // downstream log event (including the 404 early-return path). An untrusted
+    // edge client's value is discarded and a fresh id generated.
+    let request_id = ensure_request_id(&mut parts.headers, trusted);
     tracing::Span::current().record("request_id", request_id.as_str());
 
     // Attach opt-in access-log fields to the span so they ride every event
@@ -498,19 +510,14 @@ async fn forward_inner(
 
     // ── identity / forwarding headers ────────────────────────────────────────
     // request_id was already added near the top of this function so the span
-    // carries it from early failures too. We only inject the remaining ones
-    // here, on the upstream-bound request.
-    let _traceparent = ensure_traceparent(&mut parts.headers);
-    let peer_ip = ctx.peer.ip();
-    // Single lock-free load of the forwarding policy for this request - a
-    // reload may swap it afterwards; this request stays consistent.
-    let forwarded = ctx.forwarded.load();
-    let trusted = forwarded.trusts(peer_ip, ctx.mode);
+    // carries it from early failures too. `trusted` / `emit_forwarded` were
+    // computed there as well from a single load of the forwarding policy.
+    let _traceparent = ensure_traceparent(&mut parts.headers, trusted);
     apply_forwarded_for(&mut parts.headers, peer_ip, trusted);
     apply_forwarded_host(&mut parts.headers, inbound_host_owned.as_deref());
     // We always terminate TLS on the inbound side, so upstream sees https.
     apply_forwarded_proto(&mut parts.headers, "https");
-    if forwarded.emit {
+    if emit_forwarded {
         apply_forwarded(
             &mut parts.headers,
             peer_ip,
@@ -824,10 +831,19 @@ async fn handle_ws_upgrade(
     ws_ctx: WsContext,
     start: Instant,
 ) -> Response<ProxyBody> {
+    // Whether the immediate peer is trusted to set forwarding / identity
+    // headers (see forward_inner). Read once up front so the early request-id
+    // stamp can gate on it.
+    let peer_ip = ctx.peer.ip();
+    let (trusted, emit_forwarded) = {
+        let fp = ctx.forwarded.load();
+        (fp.trusts(peer_ip, ctx.mode), fp.emit)
+    };
+
     // Mirror forward_inner: stamp the request_id onto the parent "req" span
     // so even early-return paths (no-route etc.) get the correlation key in
     // the access log.
-    let request_id = ensure_request_id(req.headers_mut());
+    let request_id = ensure_request_id(req.headers_mut(), trusted);
     tracing::Span::current().record("request_id", request_id.as_str());
     if !ctx.access.is_noop() {
         record_access_fields(req.headers(), &ctx.access);
@@ -917,16 +933,14 @@ async fn handle_ws_upgrade(
     // Connection must be forwarded for the handshake.
 
     // Identity / forwarding headers still apply on WS upgrades - the backend
-    // wants to know the original client IP / host even for upgrades.
-    ensure_request_id(&mut parts.headers);
-    ensure_traceparent(&mut parts.headers);
-    let peer_ip = ctx.peer.ip();
-    let forwarded = ctx.forwarded.load();
-    let trusted = forwarded.trusts(peer_ip, ctx.mode);
+    // wants to know the original client IP / host even for upgrades. `trusted`
+    // / `emit_forwarded` / `peer_ip` were computed at the top of this function.
+    ensure_request_id(&mut parts.headers, trusted);
+    ensure_traceparent(&mut parts.headers, trusted);
     apply_forwarded_for(&mut parts.headers, peer_ip, trusted);
     apply_forwarded_host(&mut parts.headers, inbound_host_owned.as_deref());
     apply_forwarded_proto(&mut parts.headers, "https");
-    if forwarded.emit {
+    if emit_forwarded {
         apply_forwarded(
             &mut parts.headers,
             peer_ip,
