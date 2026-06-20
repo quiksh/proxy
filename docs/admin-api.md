@@ -33,17 +33,21 @@ the config. The API is for live changes.
 | POST   | `/admin/pools/{pool}/members/{id}/undrain`           | Cancel a drain; member becomes active again.    |
 | DELETE | `/admin/pools/{pool}/members/{id}`                   | Drain, then remove from the pool.               |
 | GET    | `/admin/config/snapshot`                             | Live upstream state as TOML - for promoting runtime changes back to the config file. |
+| POST   | `/admin/config/reload`                               | Re-read the config file and hot-swap routes, auth, and forwarding policy. |
 
 Member `{id}` is the member's `address` (`host:port`), URL-encoded if
 needed.
 
 ## Config drift
 
-The config file is the source of truth - pools, routes, auth blocks, and
-listeners only ever come from it. The admin API is for *tactical* live
-changes within that structure (add/drain/remove members in an existing
-pool). Anything you add via the API is lost on restart unless you also
-update the config file.
+The config file is the source of truth. Routes, `[[auth]]` blocks, and the
+`[forwarded]` policy can be edited in the file and applied live with
+[config reload](#config-reload) (below). The admin API endpoints in this
+section are for *tactical* live changes to upstream *membership*
+(add/drain/remove members in an existing pool) - membership is the one thing
+reload deliberately leaves alone, so the two mechanisms don't fight. Anything
+you add via the membership API is lost on restart unless you also update the
+config file.
 
 To make the drift visible, every member in admin responses carries a
 `source` field:
@@ -80,10 +84,69 @@ members = [
 ]
 ```
 
-The output is scoped to `[[upstreams]]` blocks - nothing else can drift at
-runtime. Diff against your config file, paste the `runtime` members across
-when you're ready to make them durable, and the next restart will pick
-them up.
+The output is scoped to `[[upstreams]]` blocks - the only thing that drifts
+through the *membership* API. Diff against your config file, paste the
+`runtime` members across when you're ready to make them durable, and the next
+restart will pick them up.
+
+## Config reload
+
+`POST /admin/config/reload` re-reads the config file (the same path passed on
+the command line) and hot-swaps the sections that can change without rebinding
+a socket or rebuilding a TLS acceptor:
+
+- **routes** - add, remove, or retune routes and their modules (`strip_prefix`,
+  `timeout_ms`, `max_body_bytes`, `auth`).
+- **`[[auth]]` blocks** - JWKS URLs, issuer/audience, allowed algorithms,
+  injected headers. (A reloaded block starts with an empty JWKS cache, so the
+  first request per `kid` re-fetches.)
+- **`[forwarded]`** - trusted-proxy CIDRs and the RFC 7239 `Forwarded` emit
+  toggle.
+
+The swap is atomic and lock-free: an in-flight request finishes on the config
+it started with, and the next request picks up the new one.
+
+A `SIGHUP` does exactly the same thing (`kill -HUP <pid>`) - handy when you
+don't want to expose or authenticate the admin write surface.
+
+### What reload does *not* touch
+
+Everything else requires a restart, because it's baked into a bound socket, a
+TLS acceptor, a per-pool hyper client, or the once-initialised tracing
+subscriber: the listener (`bind`, TLS cert/key, HTTP/2 limits), the admin and
+egress listeners, `mode`, `[shutdown]`, `[logging]`, and **upstream pool
+*shape*** (balancer, per-pool TLS, HTTP version, health, drain, client-pool
+tuning). Upstream *membership* is excluded too - it's managed by the
+membership API above, so reload neither applies member edits from the file nor
+rejects on them.
+
+Reload is **all-or-nothing and fail-safe**. The candidate config is loaded and
+validated first; if it fails to parse/validate, or if any non-reloadable
+section changed, the running config is left completely untouched:
+
+| Result                                   | Status | Notes                                              |
+|------------------------------------------|--------|----------------------------------------------------|
+| Applied                                  | `200`  | Body: `{ "status": "reloaded", "routes": N, "auth_blocks": M, "path": "..." }` |
+| A non-reloadable section changed         | `409`  | Body names the offending section. Nothing applied. |
+| File missing / bad TOML / failed validation | `400` | Nothing applied.                                   |
+| Reload not wired into this process       | `501`  | Only when built/embedded without a reload handle.  |
+
+```bash
+ADMIN=http://127.0.0.1:9090
+
+# Edit the config file, then:
+curl -s -X POST "$ADMIN/admin/config/reload" | jq
+# { "status": "reloaded", "path": "/etc/quik/quik.toml", "routes": 4, "auth_blocks": 1 }
+
+# Or via signal:
+kill -HUP "$(pgrep quik)"
+```
+
+Reloads are observable in metrics: `quik_config_reloads_total{result}`
+(`success` / `rejected` / `load_error` / `build_error`) and
+`quik_config_last_reload_timestamp_seconds`. Both triggers also log a line
+(`config reloaded` / `config reload failed`); admin-triggered reloads emit an
+audit record (`action = "reload_config"`).
 
 ## State machine
 

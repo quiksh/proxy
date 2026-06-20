@@ -15,6 +15,8 @@
 //! - [`headers`]: hop-by-hop stripping + identity-header generation
 //!   (`request-id`, `traceparent`, `X-Forwarded-*`). CSPRNG-backed IDs.
 //! - [`shutdown`]: SIGTERM/SIGINT drain with double-signal force exit.
+//! - [`reload`]: hot config reload (SIGHUP / admin API) - atomically swaps
+//!   routes, auth, and forwarding policy; rejects changes to immutable sections.
 //! - [`admin`]: separate listener for `/healthz`, `/metrics`, and the
 //!   `/admin/pools/*` registration API. Optional TLS + mTLS or bearer auth.
 //! - [`observability`]: tracing + metrics init; pre-built handles for hot paths.
@@ -29,6 +31,7 @@ pub mod egress;
 pub mod headers;
 pub mod observability;
 pub mod proxy;
+pub mod reload;
 pub mod routing;
 pub mod shutdown;
 pub mod tls;

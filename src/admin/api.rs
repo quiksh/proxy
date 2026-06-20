@@ -13,6 +13,7 @@ use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use hyper::body::Incoming;
 use serde::Serialize;
 
+use crate::reload::{ReloadError, ReloadHandle};
 use crate::shutdown::Coordinator;
 use crate::upstream::{Pool, drain::drain_member, unix_now_ms};
 
@@ -27,6 +28,9 @@ pub type AdminBody = BoxBody<Bytes, hyper::Error>;
 pub struct RequestState<'a> {
     pub upstreams: &'a Arc<Pool>,
     pub auth_groups: &'a CompiledAuthGroups,
+    /// Config-reload handle backing `POST /admin/config/reload`. `None` when
+    /// reload wasn't wired (the endpoint then returns 501).
+    pub reload: Option<&'a ReloadHandle>,
     pub shutdown: &'a Coordinator,
     pub peer: std::net::SocketAddr,
     /// Verified peer cert (mTLS). `None` for plain HTTP or TLS without client cert.
@@ -86,6 +90,9 @@ pub async fn dispatch(req: Request<Incoming>, state: RequestState<'_>) -> Respon
             undrain_member(&state, pool, id, &principal, started).await
         }
         (Method::GET, ["admin", "config", "snapshot"]) => config_snapshot(&state).await,
+        (Method::POST, ["admin", "config", "reload"]) => {
+            reload_config(&state, &principal, started).await
+        }
         _ => error_response(StatusCode::NOT_FOUND, "not found"),
     }
 }
@@ -189,6 +196,78 @@ fn render_pool_toml(out: &mut String, entry: &crate::upstream::UpstreamPoolEntry
         );
     }
     let _ = writeln!(out, "]\n");
+}
+
+// ── Config reload ─────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct ReloadResponse {
+    status: &'static str,
+    path: String,
+    routes: usize,
+    auth_blocks: usize,
+}
+
+/// `POST /admin/config/reload` - re-read the config file and hot-swap the
+/// reloadable sections (routes, `[[auth]]`, `[forwarded]`). The running config
+/// is untouched on any failure.
+///
+/// - `200` with a summary on success.
+/// - `409 Conflict` if a section that can't be hot-reloaded changed (listener,
+///   TLS, upstream pool shape, ...) - the body names it.
+/// - `400 Bad Request` if the file failed to load/validate or build.
+/// - `501 Not Implemented` if reload wasn't wired into this process.
+async fn reload_config(
+    state: &RequestState<'_>,
+    principal: &str,
+    started: std::time::Instant,
+) -> Response<AdminBody> {
+    let Some(handle) = state.reload else {
+        return error_response(StatusCode::NOT_IMPLEMENTED, "config reload not enabled");
+    };
+    match handle.reload() {
+        Ok(outcome) => {
+            audit(
+                "reload_config",
+                "-",
+                "-",
+                principal,
+                state.peer,
+                "ok",
+                started,
+            );
+            json_response(
+                StatusCode::OK,
+                &ReloadResponse {
+                    status: "reloaded",
+                    path: handle.path().display().to_string(),
+                    routes: outcome.routes,
+                    auth_blocks: outcome.auth_blocks,
+                },
+            )
+        }
+        Err(e) => {
+            // A restart-only change is a conflict; a bad/invalid file is a
+            // client error. The audit/metric label comes from the error itself.
+            let status = match &e {
+                ReloadError::ImmutableChanged(_) => StatusCode::CONFLICT,
+                ReloadError::Load(_) | ReloadError::Build(_) => StatusCode::BAD_REQUEST,
+            };
+            audit(
+                "reload_config",
+                "-",
+                "-",
+                principal,
+                state.peer,
+                e.result_label(),
+                started,
+            );
+            json_response(
+                status,
+                &ErrorResponse::with_detail("reload failed", e.to_string()),
+            )
+        }
+    }
 }
 
 // ── Mutating handlers ───────────────────────────────────────────────────────

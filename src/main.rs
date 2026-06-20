@@ -2,7 +2,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use quik::{admin, auth, config, egress, observability, proxy, routing, shutdown, tls, upstream};
+use quik::{
+    admin, auth, config, egress, observability, proxy, reload, routing, shutdown, tls, upstream,
+};
 use tokio::net::TcpListener;
 
 fn parse_config_path() -> Result<PathBuf> {
@@ -50,7 +52,24 @@ async fn main() -> Result<()> {
 
     let routing = Arc::new(routing::SharedRoutingTable::from_config(&cfg)?);
     let upstreams = Arc::new(upstream::Pool::from_config(&cfg)?);
-    let auth_registry = Arc::new(auth::AuthRegistry::from_config(&cfg)?);
+    let auth_registry = Arc::new(auth::SharedAuthRegistry::from_config(&cfg)?);
+    let forwarded = Arc::new(quik::headers::SharedForwardedPolicy::from_config(
+        &cfg.forwarded,
+    ));
+
+    // Hot config reload. SIGHUP and `POST /admin/config/reload` both funnel
+    // through this handle, which shares the routing / forwarded / auth handles
+    // above so a swap is observed by in-flight connections. Routes, auth, and
+    // forwarding policy reload in place; changes to any other section are
+    // rejected (restart required). See docs/config-reference.md.
+    let reload = reload::ReloadHandle::new(
+        config_path.clone(),
+        cfg.clone(),
+        routing.clone(),
+        forwarded.clone(),
+        auth_registry.clone(),
+    );
+    reload::install_sighup_handler(reload.clone());
 
     // Background sampler keeps the `quik_upstream_inflight` gauge fresh
     // without paying a metrics emission cost on every request.
@@ -98,6 +117,7 @@ async fn main() -> Result<()> {
         metrics,
         upstreams: upstreams.clone(),
         auth_groups: admin_auth,
+        reload: Some(reload.clone()),
     };
     let admin_tls_cfg = cfg.admin.tls.clone();
     let shutdown_for_admin = shutdown.clone();
@@ -120,7 +140,7 @@ async fn main() -> Result<()> {
             upstreams,
             auth: auth_registry.clone(),
             mode: cfg.mode,
-            forwarded: Arc::new(quik::headers::ForwardedPolicy::from_config(&cfg.forwarded)),
+            forwarded: forwarded.clone(),
             access: Arc::new(proxy::AccessLogFields::from_logging(&cfg.logging)?),
             limits: Arc::new(cfg.listener.limits.clone()),
         },
@@ -132,7 +152,7 @@ async fn main() -> Result<()> {
     let egress_task = if let Some(egress_cfg) = &cfg.egress {
         let policy = Arc::new(egress::EgressPolicy::from_config_with_auth(
             egress_cfg,
-            &auth_registry,
+            &auth_registry.snapshot(),
         )?);
         let listener = TcpListener::bind(egress_cfg.bind)
             .await

@@ -9,6 +9,14 @@ example deployments, see the scenario guides:
 - [Forward proxy](forward-proxy.md)
 - [Admin API](admin-api.md)
 
+> **Reloadable at runtime.** `[[routes]]`, `[[auth]]`, and `[forwarded]` can be
+> edited and applied to a running proxy without a restart - send `SIGHUP` or
+> `POST /admin/config/reload`. Every other section (listener, admin, egress,
+> `mode`, `[shutdown]`, `[logging]`, and upstream pool *shape*) is fixed at boot;
+> reload rejects a change to any of them rather than applying it partially.
+> Upstream pool *membership* is managed separately via the admin API. See
+> [Config reload](admin-api.md#config-reload).
+
 ## Top-level
 
 ```toml

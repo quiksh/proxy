@@ -44,10 +44,10 @@ use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tracing::Instrument;
 
-use crate::auth::{AuthError, AuthRegistry, extract_bearer_token};
+use crate::auth::{AuthError, SharedAuthRegistry, extract_bearer_token};
 use crate::config::Mode;
 use crate::headers::{
-    ForwardedPolicy, apply_forwarded, apply_forwarded_for, apply_forwarded_host,
+    SharedForwardedPolicy, apply_forwarded, apply_forwarded_for, apply_forwarded_host,
     apply_forwarded_proto, ensure_request_id, ensure_traceparent, strip_hop_by_hop,
 };
 use crate::routing::SharedRoutingTable;
@@ -61,7 +61,9 @@ use crate::upstream::{CountingBody, InflightGuard, Pool, ProxyBody};
 pub struct RequestContext {
     pub peer: SocketAddr,
     pub mode: Mode,
-    pub forwarded: Arc<ForwardedPolicy>,
+    /// Forwarding-header policy, behind an `ArcSwap` so a config reload swaps it
+    /// without coordinating with in-flight connections. Loaded per request.
+    pub forwarded: Arc<SharedForwardedPolicy>,
     /// Optional request-derived access-log fields (`client_ip`, `user_agent`).
     pub access: Arc<AccessLogFields>,
 }
@@ -105,10 +107,11 @@ pub struct WsContext {
 pub struct ServerState {
     pub routing: Arc<SharedRoutingTable>,
     pub upstreams: Arc<Pool>,
-    pub auth: Arc<AuthRegistry>,
+    pub auth: Arc<SharedAuthRegistry>,
     pub mode: Mode,
-    /// Forwarding-header policy (trusted proxies + RFC 7239 emit toggle).
-    pub forwarded: Arc<ForwardedPolicy>,
+    /// Forwarding-header policy (trusted proxies + RFC 7239 emit toggle),
+    /// behind an `ArcSwap` so config reload can replace it lock-free.
+    pub forwarded: Arc<SharedForwardedPolicy>,
     /// Opt-in request-derived access-log fields (`[logging]`).
     pub access: Arc<AccessLogFields>,
     /// Defensive timeouts + protocol-level limits applied to every inbound
@@ -264,7 +267,7 @@ async fn forward(
     req: Request<Incoming>,
     routing: &SharedRoutingTable,
     upstreams: &Pool,
-    auth: &AuthRegistry,
+    auth: &SharedAuthRegistry,
     ctx: RequestContext,
     ws_ctx: WsContext,
 ) -> Response<ProxyBody> {
@@ -292,7 +295,7 @@ async fn forward_inner(
     req: Request<Incoming>,
     routing: &SharedRoutingTable,
     upstreams: &Pool,
-    auth: &AuthRegistry,
+    auth: &SharedAuthRegistry,
     ctx: RequestContext,
     ws_ctx: WsContext,
 ) -> Response<ProxyBody> {
@@ -499,12 +502,15 @@ async fn forward_inner(
     // here, on the upstream-bound request.
     let _traceparent = ensure_traceparent(&mut parts.headers);
     let peer_ip = ctx.peer.ip();
-    let trusted = ctx.forwarded.trusts(peer_ip, ctx.mode);
+    // Single lock-free load of the forwarding policy for this request - a
+    // reload may swap it afterwards; this request stays consistent.
+    let forwarded = ctx.forwarded.load();
+    let trusted = forwarded.trusts(peer_ip, ctx.mode);
     apply_forwarded_for(&mut parts.headers, peer_ip, trusted);
     apply_forwarded_host(&mut parts.headers, inbound_host_owned.as_deref());
     // We always terminate TLS on the inbound side, so upstream sees https.
     apply_forwarded_proto(&mut parts.headers, "https");
-    if ctx.forwarded.emit {
+    if forwarded.emit {
         apply_forwarded(
             &mut parts.headers,
             peer_ip,
@@ -813,7 +819,7 @@ async fn handle_ws_upgrade(
     mut req: Request<Incoming>,
     routing: &SharedRoutingTable,
     upstreams: &Pool,
-    _auth: &AuthRegistry,
+    _auth: &SharedAuthRegistry,
     ctx: RequestContext,
     ws_ctx: WsContext,
     start: Instant,
@@ -915,11 +921,12 @@ async fn handle_ws_upgrade(
     ensure_request_id(&mut parts.headers);
     ensure_traceparent(&mut parts.headers);
     let peer_ip = ctx.peer.ip();
-    let trusted = ctx.forwarded.trusts(peer_ip, ctx.mode);
+    let forwarded = ctx.forwarded.load();
+    let trusted = forwarded.trusts(peer_ip, ctx.mode);
     apply_forwarded_for(&mut parts.headers, peer_ip, trusted);
     apply_forwarded_host(&mut parts.headers, inbound_host_owned.as_deref());
     apply_forwarded_proto(&mut parts.headers, "https");
-    if ctx.forwarded.emit {
+    if forwarded.emit {
         apply_forwarded(
             &mut parts.headers,
             peer_ip,
