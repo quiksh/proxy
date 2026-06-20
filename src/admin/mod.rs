@@ -31,6 +31,7 @@ use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
 use crate::config::{AdminConfig, AdminTlsConfig};
+use crate::reload::ReloadHandle;
 use crate::shutdown::Coordinator;
 use crate::upstream::Pool;
 
@@ -43,6 +44,9 @@ pub struct AdminState {
     pub metrics: PrometheusHandle,
     pub upstreams: Arc<Pool>,
     pub auth_groups: CompiledAuthGroups,
+    /// Config-reload handle backing `POST /admin/config/reload`. `None` leaves
+    /// that endpoint returning 501 (e.g. tests that don't wire reload).
+    pub reload: Option<ReloadHandle>,
 }
 
 /// Build the admin auth groups from config, resolving env-var-backed
@@ -287,6 +291,7 @@ async fn handle_admin(
         let req_state = api::RequestState {
             upstreams: &state.upstreams,
             auth_groups: &state.auth_groups,
+            reload: state.reload.as_ref(),
             shutdown,
             peer,
             peer_cert,

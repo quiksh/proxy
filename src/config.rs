@@ -868,6 +868,91 @@ pub fn load(path: &Path) -> Result<Config> {
     Ok(cfg)
 }
 
+/// Detect whether any config section that *cannot* be hot-reloaded differs
+/// between the running config (`old`) and a candidate reload (`new`). Returns
+/// `Some(section)` naming the first changed immutable section, or `None` when
+/// only hot-reloadable sections differ.
+///
+/// Hot-reloadable (a reload swaps these in place): `routes`, `auth`, and
+/// `forwarded`. Everything else requires a restart, because it is baked into a
+/// bound socket, a TLS acceptor, a hyper client, or a once-initialised
+/// subscriber: `mode`, `listener`, `admin`, `shutdown`, `logging`, `egress`,
+/// `nats`, and upstream pool *shape* (every per-pool field except `members`).
+///
+/// Pool *membership* is deliberately excluded from the comparison: members are
+/// managed at runtime via the admin API, so a reload neither applies member
+/// edits from the file nor rejects on them.
+///
+/// Comparison is by `Debug` representation. Every section type derives `Debug`,
+/// and within a single process the rendering is deterministic, so this is a
+/// faithful structural equality without threading `PartialEq` through the whole
+/// config tree.
+pub fn immutable_change(old: &Config, new: &Config) -> Option<&'static str> {
+    fn ne<T: std::fmt::Debug>(a: &T, b: &T) -> bool {
+        format!("{a:?}") != format!("{b:?}")
+    }
+
+    if ne(&old.mode, &new.mode) {
+        return Some("mode");
+    }
+    if ne(&old.listener, &new.listener) {
+        return Some("listener");
+    }
+    if ne(&old.admin, &new.admin) {
+        return Some("admin");
+    }
+    if ne(&old.shutdown, &new.shutdown) {
+        return Some("shutdown");
+    }
+    if ne(&old.logging, &new.logging) {
+        return Some("logging");
+    }
+    if ne(&old.egress, &new.egress) {
+        return Some("egress");
+    }
+    if ne(&old.nats, &new.nats) {
+        return Some("nats");
+    }
+    if pool_shapes(old) != pool_shapes(new) {
+        return Some("upstreams");
+    }
+    None
+}
+
+/// A sorted, member-independent fingerprint of each upstream pool. Two configs
+/// with the same pools (names + every per-pool setting other than `members`)
+/// produce equal vectors regardless of pool ordering in the file.
+fn pool_shapes(cfg: &Config) -> Vec<String> {
+    let mut shapes: Vec<String> = cfg
+        .upstreams
+        .iter()
+        .map(|u| {
+            // Destructure exhaustively (no `..`) so adding a field to
+            // `UpstreamPoolConfig` is a compile error here, forcing a decision
+            // about whether it's reloadable. `members` is the one field
+            // intentionally excluded (it's admin-API-managed).
+            let UpstreamPoolConfig {
+                name,
+                members: _,
+                balancer,
+                tls,
+                health,
+                http_version,
+                active_health,
+                drain,
+                pool,
+                nats,
+            } = u;
+            format!(
+                "{name}|{balancer:?}|{tls:?}|{health:?}|{http_version:?}|\
+                 {active_health:?}|{drain:?}|{pool:?}|{nats:?}"
+            )
+        })
+        .collect();
+    shapes.sort();
+    shapes
+}
+
 /// Expand `${VAR}` and `${VAR:-default}` into env values inside the raw config
 /// text, before TOML parsing. Errors if a referenced variable is missing and
 /// no default is provided.

@@ -188,7 +188,7 @@ impl SharedRoutingTable {
         self.inner.load()
     }
 
-    #[allow(dead_code)]
+    /// Atomically replace the routing table. Called by the config-reload path.
     pub fn swap(&self, new: RoutingTable) {
         self.inner.store(Arc::new(new));
     }

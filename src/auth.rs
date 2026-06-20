@@ -111,6 +111,53 @@ impl AuthRegistry {
     }
 }
 
+/// An [`AuthRegistry`] behind an [`ArcSwap`] so a config reload can replace the
+/// set of `[[auth]]` validators atomically. Readers (the proxy hot path) take a
+/// single lock-free load per lookup. Mirrors
+/// [`crate::routing::SharedRoutingTable`].
+///
+/// A swapped-in registry carries fresh, empty [`JwksCache`]s: the first request
+/// per `kid` after a reload re-fetches the JWKS. In-flight validations holding
+/// an `Arc<AuthValidator>` from the previous registry complete unaffected.
+pub struct SharedAuthRegistry {
+    inner: ArcSwap<AuthRegistry>,
+}
+
+impl SharedAuthRegistry {
+    pub fn new(registry: AuthRegistry) -> Self {
+        Self {
+            inner: ArcSwap::from_pointee(registry),
+        }
+    }
+
+    pub fn from_config(cfg: &Config) -> Result<Self> {
+        Ok(Self::new(AuthRegistry::from_config(cfg)?))
+    }
+
+    /// Test-only: build validators whose JWKS clients skip certificate
+    /// verification. See [`AuthRegistry::from_config_for_tests`].
+    #[doc(hidden)]
+    pub fn from_config_for_tests(cfg: &Config) -> Result<Self> {
+        Ok(Self::new(AuthRegistry::from_config_for_tests(cfg)?))
+    }
+
+    /// Resolve a validator by name (single lock-free load + Arc clone).
+    pub fn get(&self, name: &str) -> Option<Arc<AuthValidator>> {
+        self.inner.load().get(name)
+    }
+
+    /// Borrow the current registry as an `Arc`. Used at startup to seed the
+    /// egress policy, which holds its own boot-time validator clones.
+    pub fn snapshot(&self) -> Arc<AuthRegistry> {
+        self.inner.load_full()
+    }
+
+    /// Atomically replace the registry. Called by the config-reload path.
+    pub fn swap(&self, registry: AuthRegistry) {
+        self.inner.store(Arc::new(registry));
+    }
+}
+
 struct CompiledMapping {
     claim: String,
     header: HeaderName,

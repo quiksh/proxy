@@ -33,6 +33,10 @@ small HTTP admin API.
   optional **active health probes**.
 - **Online member management** via a separate admin listener: add, drain,
   undrain, or remove members without restarting.
+- **Hot config reload** of routes, `[[auth]]` blocks, and the `[forwarded]`
+  policy - via `SIGHUP` or `POST /admin/config/reload`. All-or-nothing and
+  fail-safe: a bad or restart-only change is rejected and the running config
+  keeps serving ([docs/admin-api.md](docs/admin-api.md#config-reload)).
 - **Service registration** (optional `nats` feature): backends self-register
   into a NATS JetStream KV bucket and quik reconciles them into the pool - with
   a registrable-address allow-list, member caps, and operator overrides. See

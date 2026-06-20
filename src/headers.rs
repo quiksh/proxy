@@ -19,8 +19,10 @@
 //!   trust model, but only when [`ForwardedPolicy::emit`] is set.
 
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use arc_swap::ArcSwap;
 use http::header::{
     CONNECTION, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
 };
@@ -285,6 +287,34 @@ impl ForwardedPolicy {
             Mode::Host => true,
             Mode::Edge => self.trusted_proxies.iter().any(|n| n.contains(&peer)),
         }
+    }
+}
+
+/// A [`ForwardedPolicy`] behind an [`ArcSwap`] so a config reload can hot-swap
+/// the trusted-proxy set / `emit` toggle without coordinating with in-flight
+/// requests. Mirrors [`crate::routing::SharedRoutingTable`]: the hot path does
+/// a single lock-free [`load`](Self::load) to read the current policy.
+#[derive(Default)]
+pub struct SharedForwardedPolicy {
+    inner: ArcSwap<ForwardedPolicy>,
+}
+
+impl SharedForwardedPolicy {
+    pub fn from_config(cfg: &ForwardedConfig) -> Self {
+        Self {
+            inner: ArcSwap::from_pointee(ForwardedPolicy::from_config(cfg)),
+        }
+    }
+
+    /// Load the current policy (single Arc clone). Hold the returned guard only
+    /// as briefly as the request needs - a reload may replace it afterwards.
+    pub fn load(&self) -> arc_swap::Guard<Arc<ForwardedPolicy>> {
+        self.inner.load()
+    }
+
+    /// Atomically replace the policy. Called by the config-reload path.
+    pub fn swap(&self, new: ForwardedPolicy) {
+        self.inner.store(Arc::new(new));
     }
 }
 

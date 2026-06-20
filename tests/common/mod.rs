@@ -809,9 +809,11 @@ async fn spawn_proxy_full(
     // Build the auth registry. For tests we use the skip_verify JWKS client
     // so the harness's self-signed-or-plaintext JWKS server is reachable.
     let auth_registry = if cfg.auth.is_empty() {
-        Arc::new(quik::auth::AuthRegistry::empty())
+        Arc::new(quik::auth::SharedAuthRegistry::new(
+            quik::auth::AuthRegistry::empty(),
+        ))
     } else {
-        Arc::new(quik::auth::AuthRegistry::from_config_for_tests(&cfg).expect("auth"))
+        Arc::new(quik::auth::SharedAuthRegistry::from_config_for_tests(&cfg).expect("auth"))
     };
 
     let upstreams = Arc::new(Pool::from_config(&cfg).expect("pool"));
@@ -844,6 +846,7 @@ async fn spawn_proxy_full(
         metrics,
         upstreams: upstreams.clone(),
         auth_groups: admin_auth,
+        reload: None,
     };
     let admin_tls_cfg = cfg.admin.tls.clone();
     let shutdown_for_admin = shutdown.clone();
@@ -865,7 +868,7 @@ async fn spawn_proxy_full(
             upstreams: upstreams.clone(),
             auth: auth_registry,
             mode: cfg.mode,
-            forwarded: std::sync::Arc::new(quik::headers::ForwardedPolicy::from_config(
+            forwarded: std::sync::Arc::new(quik::headers::SharedForwardedPolicy::from_config(
                 &cfg.forwarded,
             )),
             access: std::sync::Arc::new(
@@ -895,7 +898,7 @@ pub fn install_metrics_recorder() {
 /// Install the prometheus recorder exactly once per test process. Cargo runs
 /// the tests inside a binary on multiple threads in parallel, so calling
 /// `install_recorder()` per test would fail after the first.
-fn shared_metrics_handle() -> metrics_exporter_prometheus::PrometheusHandle {
+pub fn shared_metrics_handle() -> metrics_exporter_prometheus::PrometheusHandle {
     static HANDLE: OnceLock<metrics_exporter_prometheus::PrometheusHandle> = OnceLock::new();
     HANDLE
         .get_or_init(|| {
