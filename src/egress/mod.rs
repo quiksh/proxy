@@ -164,12 +164,21 @@ async fn handle_request(
     }
 
     let elapsed_ms = start.elapsed().as_millis() as u64;
+    // Label by destination only for ALLOWED connects, where the host set is
+    // bounded by the allow-list. Denied targets are caller-controlled and
+    // unbounded - the untrusted party egress exists to contain - so labelling
+    // them would let a client mint one metric series per bogus hostname and
+    // exhaust the registry (a cardinality DoS). Denied hosts stay in the access
+    // log below for forensics, which is the right home for unbounded values.
     metrics::counter!("quik_egress_connects_total",
         "action" => match decision {
             Decision::Allow => "allow",
             Decision::Deny => "deny",
         },
-        "target" => host.clone(),
+        "target" => match decision {
+            Decision::Allow => host.clone(),
+            Decision::Deny => "-".to_string(),
+        },
     )
     .increment(1);
 
