@@ -20,7 +20,11 @@ pub struct Config {
     /// Forwarding-header policy (trusted proxies, RFC 7239 `Forwarded`).
     #[serde(default)]
     pub forwarded: ForwardedConfig,
-    pub listener: ListenerConfig,
+    /// The inbound reverse-proxy listener. Optional: omit it to run quik as a
+    /// dedicated forward (egress) proxy with only an `[egress]` block. A config
+    /// with neither `[listener]` nor `[egress]` is rejected by `validate`.
+    #[serde(default)]
+    pub listener: Option<ListenerConfig>,
     pub admin: AdminConfig,
     #[serde(default)]
     pub shutdown: ShutdownConfig,
@@ -984,6 +988,14 @@ pub fn expand_env(input: &str) -> Result<String> {
 }
 
 fn validate(cfg: &Config) -> Result<()> {
+    // quik must do *something*: serve inbound (`[listener]`) or filter outbound
+    // (`[egress]`). A config with neither would bind only the admin port.
+    if cfg.listener.is_none() && cfg.egress.is_none() {
+        anyhow::bail!(
+            "config defines neither [listener] (reverse proxy) nor [egress] (forward proxy) - nothing to serve"
+        );
+    }
+
     // Fail boot on a malformed [logging].client_ip_header rather than silently
     // dropping it later.
     cfg.logging.parsed_client_ip_header()?;
@@ -1367,5 +1379,32 @@ bind = "127.0.0.1:9090"
         let cfg: Config = toml::from_str(&s).unwrap();
         let err = validate(&cfg).unwrap_err();
         assert!(err.to_string().contains("no members"), "{err}");
+    }
+
+    #[test]
+    fn egress_only_config_is_valid() {
+        // No [listener]: quik runs as a dedicated forward (egress) proxy.
+        let s = r#"
+[admin]
+bind = "127.0.0.1:9090"
+[egress]
+bind = "0.0.0.0:3128"
+default_action = "deny"
+[[egress.rules]]
+action = "allow"
+hosts = ["api.openai.com"]
+"#;
+        let cfg: Config = toml::from_str(s).unwrap();
+        validate(&cfg).unwrap();
+        assert!(cfg.listener.is_none());
+        assert!(cfg.egress.is_some());
+    }
+
+    #[test]
+    fn rejects_config_with_neither_listener_nor_egress() {
+        let s = "[admin]\nbind = \"127.0.0.1:9090\"\n";
+        let cfg: Config = toml::from_str(s).unwrap();
+        let err = validate(&cfg).unwrap_err();
+        assert!(err.to_string().contains("neither [listener]"), "{err}");
     }
 }
