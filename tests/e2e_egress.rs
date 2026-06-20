@@ -126,6 +126,41 @@ async fn egress_denies_destination_not_covered_by_any_rule() {
 }
 
 #[tokio::test]
+async fn egress_deny_does_not_label_metric_by_caller_target() {
+    // A denied target is caller-controlled and unbounded. It must NOT become a
+    // metric label value (a cardinality DoS - one series per bogus host). The
+    // deny path counts with target="-"; the host only lives in the access log.
+    let egress_addr = spawn_egress(vec![], EgressAction::Deny).await;
+
+    // A unique, unroutable target no other test uses (RFC 5737 TEST-NET-2).
+    let probe = "198.51.100.7:443";
+    let mut tunnel = TcpStream::connect(egress_addr).await.unwrap();
+    let connect = format!("CONNECT {probe} HTTP/1.1\r\nHost: {probe}\r\n\r\n");
+    tunnel.write_all(connect.as_bytes()).await.unwrap();
+    let resp = read_some(&mut tunnel, 256).await;
+    assert!(
+        resp.starts_with("HTTP/1.1 403"),
+        "expected 403, got: {resp:?}"
+    );
+
+    // The metric is incremented synchronously before the 403 is returned, so
+    // by now it's recorded. Render the shared registry and check the label.
+    let rendered = common::shared_metrics_handle().render();
+    assert!(
+        !rendered.contains("198.51.100.7"),
+        "denied caller target leaked into a metric label:\n{rendered}"
+    );
+    assert!(
+        rendered
+            .lines()
+            .any(|l| l.contains("quik_egress_connects_total")
+                && l.contains("action=\"deny\"")
+                && l.contains("target=\"-\"")),
+        "deny should be counted with target=\"-\":\n{rendered}"
+    );
+}
+
+#[tokio::test]
 async fn egress_denies_specific_rule_wins_over_default_allow() {
     let dest = Backend::spawn("dest").await;
     // Default-allow, but deny 127.0.0.0/8 specifically.
