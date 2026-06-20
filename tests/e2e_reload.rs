@@ -72,7 +72,11 @@ async fn serve_from_file(cfg_path: PathBuf) -> ReloadProxy {
 
     let shutdown = Coordinator::new(2, 0);
 
-    let proxy_listener = TcpListener::bind(cfg.listener.bind)
+    let listener_cfg = cfg
+        .listener
+        .as_ref()
+        .expect("reload e2e config has a listener");
+    let proxy_listener = TcpListener::bind(listener_cfg.bind)
         .await
         .expect("bind proxy");
     let admin_listener = TcpListener::bind(cfg.admin.bind).await.expect("bind admin");
@@ -99,7 +103,7 @@ async fn serve_from_file(cfg_path: PathBuf) -> ReloadProxy {
         .await
     });
 
-    let tls = quik::tls::build_acceptor(&cfg.listener.tls).expect("tls acceptor");
+    let tls = quik::tls::build_acceptor(&listener_cfg.tls).expect("tls acceptor");
     let state = quik::proxy::ServerState {
         routing,
         upstreams,
@@ -109,7 +113,7 @@ async fn serve_from_file(cfg_path: PathBuf) -> ReloadProxy {
         access: Arc::new(
             quik::proxy::AccessLogFields::from_logging(&cfg.logging).expect("logging"),
         ),
-        limits: Arc::new(cfg.listener.limits.clone()),
+        limits: Arc::new(listener_cfg.limits.clone()),
     };
     tokio::spawn(quik::proxy::serve(
         proxy_listener,

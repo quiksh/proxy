@@ -756,14 +756,14 @@ async fn spawn_proxy_full(
     let cfg = Config {
         mode,
         forwarded,
-        listener: ListenerConfig {
+        listener: Some(ListenerConfig {
             bind: "127.0.0.1:0".parse().unwrap(),
             tls: TlsConfig {
                 cert_path: "ignored".into(),
                 key_path: "ignored".into(),
             },
             limits,
-        },
+        }),
         admin: AdminConfig {
             bind: "127.0.0.1:0".parse().unwrap(),
             tls: None,
@@ -875,7 +875,13 @@ async fn spawn_proxy_full(
                 quik::proxy::AccessLogFields::from_logging(&cfg.logging)
                     .expect("valid logging config"),
             ),
-            limits: std::sync::Arc::new(cfg.listener.limits.clone()),
+            limits: std::sync::Arc::new(
+                cfg.listener
+                    .as_ref()
+                    .expect("test harness always sets a listener")
+                    .limits
+                    .clone(),
+            ),
         },
         shutdown.clone(),
     ));

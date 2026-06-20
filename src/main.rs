@@ -39,7 +39,7 @@ async fn main() -> Result<()> {
     tracing::info!(
         config = %config_path.display(),
         mode = ?cfg.mode,
-        listen = %cfg.listener.bind,
+        listener = ?cfg.listener.as_ref().map(|l| l.bind),
         admin = %cfg.admin.bind,
         "quik starting"
     );
@@ -106,9 +106,6 @@ async fn main() -> Result<()> {
     let admin_listener = TcpListener::bind(cfg.admin.bind)
         .await
         .with_context(|| format!("binding admin {}", cfg.admin.bind))?;
-    let proxy_listener = TcpListener::bind(cfg.listener.bind)
-        .await
-        .with_context(|| format!("binding listener {}", cfg.listener.bind))?;
 
     // Resolve admin auth - env-var-backed tokens fail fast on missing vars.
     let admin_auth =
@@ -131,21 +128,33 @@ async fn main() -> Result<()> {
         .await
     });
 
-    let tls_acceptor = tls::build_acceptor(&cfg.listener.tls).context("building TLS acceptor")?;
-    let proxy_task = tokio::spawn(proxy::serve(
-        proxy_listener,
-        tls_acceptor,
-        proxy::ServerState {
-            routing,
-            upstreams,
-            auth: auth_registry.clone(),
-            mode: cfg.mode,
-            forwarded: forwarded.clone(),
-            access: Arc::new(proxy::AccessLogFields::from_logging(&cfg.logging)?),
-            limits: Arc::new(cfg.listener.limits.clone()),
-        },
-        shutdown.clone(),
-    ));
+    // Inbound reverse-proxy listener. Optional: an egress-only config omits
+    // `[listener]`, in which case quik runs purely as a forward proxy and only
+    // the admin + egress listeners come up.
+    let proxy_task = if let Some(listener_cfg) = &cfg.listener {
+        let proxy_listener = TcpListener::bind(listener_cfg.bind)
+            .await
+            .with_context(|| format!("binding listener {}", listener_cfg.bind))?;
+        let tls_acceptor =
+            tls::build_acceptor(&listener_cfg.tls).context("building TLS acceptor")?;
+        Some(tokio::spawn(proxy::serve(
+            proxy_listener,
+            tls_acceptor,
+            proxy::ServerState {
+                routing,
+                upstreams: upstreams.clone(),
+                auth: auth_registry.clone(),
+                mode: cfg.mode,
+                forwarded: forwarded.clone(),
+                access: Arc::new(proxy::AccessLogFields::from_logging(&cfg.logging)?),
+                limits: Arc::new(listener_cfg.limits.clone()),
+            },
+            shutdown.clone(),
+        )))
+    } else {
+        tracing::info!("no [listener] configured - running egress-only (forward proxy)");
+        None
+    };
 
     // Optional egress (forward) proxy. Only spawned when `[egress]` is in
     // config - quik runs purely as a reverse proxy if the block is absent.
@@ -176,7 +185,9 @@ async fn main() -> Result<()> {
     match shutdown.wait_for_exit().await {
         shutdown::ExitReason::DrainComplete => {
             tracing::info!("drain grace elapsed, exiting cleanly");
-            let _ = proxy_task.await;
+            if let Some(t) = proxy_task {
+                let _ = t.await;
+            }
             let _ = admin_task.await;
             if let Some(t) = egress_task {
                 let _ = t.await;
@@ -184,7 +195,9 @@ async fn main() -> Result<()> {
         }
         shutdown::ExitReason::Forced => {
             tracing::warn!("force exit - skipping drain grace, in-flight requests will be aborted");
-            proxy_task.abort();
+            if let Some(t) = proxy_task {
+                t.abort();
+            }
             admin_task.abort();
             if let Some(t) = egress_task {
                 t.abort();
