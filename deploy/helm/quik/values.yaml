@@ -1,0 +1,186 @@
+# Default values for the quik chart.
+#
+# The fields under `config:` mirror quik's TOML config (see
+# docs/config-reference.md). The chart renders them into a ConfigMap and
+# mounts it at /etc/quik/quik.toml. quik has no runtime config reload, so a
+# change to `config:` rolls the Deployment (a config checksum annotation on the
+# pod template forces the restart). Membership inside a pool can still change at
+# runtime via the admin API or NATS; topology (routes, pools) is declared here.
+
+replicaCount: 2
+
+image:
+  repository: ghcr.io/quiksh/proxy
+  # Overrides Chart.appVersion. Pin this in production.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  fsGroup: 10001
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Spread replicas across nodes by default for HA.
+topologySpreadConstraints: []
+
+# ─── TLS ──────────────────────────────────────────────────────────────────────
+# quik's data-plane listener is TLS-only. Provide a cert one of two ways:
+#   secretName  - a pre-existing kubernetes.io/tls secret (tls.crt + tls.key).
+#   certManager - have this chart emit a cert-manager Certificate (requires
+#                 cert-manager installed; the issued secret is mounted).
+# Exactly one path must be active.
+tls:
+  secretName: ""
+  certManager:
+    enabled: false
+    # commonName defaults to the first route host if unset.
+    commonName: ""
+    dnsNames: []
+    issuerRef:
+      name: ""
+      kind: ClusterIssuer
+      group: cert-manager.io
+    duration: 2160h   # 90d
+    renewBefore: 360h # 15d
+
+# ─── Service ──────────────────────────────────────────────────────────────────
+service:
+  type: LoadBalancer
+  # Data-plane (TLS) port exposed by the Service.
+  port: 443
+  annotations: {}
+  loadBalancerIP: ""
+  # Expose the admin port (metrics + admin API) on the Service. Off by default:
+  # the admin listener is unauthenticated unless you configure config.admin.auth.
+  exposeAdmin: false
+
+# ─── Probes ───────────────────────────────────────────────────────────────────
+# Both probe quik's admin /healthz, which returns 503 during graceful drain.
+# Using it for readiness means a draining pod is pulled from endpoints; using it
+# for liveness means a wedged process is restarted.
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: admin
+  initialDelaySeconds: 2
+  periodSeconds: 10
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: admin
+  initialDelaySeconds: 2
+  periodSeconds: 5
+
+# Must be >= config.shutdown.drainGraceSeconds (+ preDrainGraceSeconds) so the
+# kubelet doesn't SIGKILL mid-drain.
+terminationGracePeriodSeconds: 40
+
+# ─── Prometheus ServiceMonitor (optional) ─────────────────────────────────────
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  labels: {}
+
+# ─── NATS service registration (optional) ─────────────────────────────────────
+# When enabled, the chart adds the top-level [nats] block. Per-pool NATS binding
+# is set on individual upstreams below via `nats:`. Requires a quik image built
+# with the `nats` feature.
+nats:
+  enabled: false
+  url: ""           # e.g. tls://nats.default.svc:4222
+  bucket: ""        # JetStream KV bucket name
+  credsSecret: ""   # optional secret with a `quik.creds` key, mounted read-only
+
+# ─── quik config (rendered to /etc/quik/quik.toml) ────────────────────────────
+config:
+  mode: edge
+
+  listener:
+    # Container port quik binds the TLS listener on.
+    port: 8443
+    # Optional listener.limits overrides; omit to use quik defaults.
+    limits: {}
+
+  admin:
+    # Bound to 0.0.0.0 inside the pod so the kubelet can reach /healthz.
+    port: 9090
+    # Optional admin auth, e.g.:
+    #   auth:
+    #     write:
+    #       mode: bearer_token
+    #       tokenEnv: QUIK_ADMIN_TOKEN
+    auth: {}
+
+  shutdown:
+    drainGraceSeconds: 30
+    # On SIGTERM, /healthz flips to 503 immediately and quik keeps accepting for
+    # this long before draining - lets the Service stop routing first. Useful
+    # when the LB reacts to readiness slower than pod termination.
+    preDrainGraceSeconds: 5
+
+  logging:
+    level: info,quik=info
+    format: json
+
+  # Upstream pools. Each becomes a [[upstreams]] block.
+  #   - name      (required)
+  #     balancer  round_robin | random | least_connections (default round_robin)
+  #     httpVersion  h1 | h2 (default h1)
+  #     members   list of { address: "host:port", scheme: http|https }
+  #     tls.skipVerify  bool (for self-signed upstreams)
+  #     activeHealth  { enabled, path, intervalMs, ... }
+  #     nats      { subject, allowAddresses: [...], maxMembers, maxInstancesPerService }
+  upstreams:
+    - name: example
+      balancer: round_robin
+      members:
+        - address: example-backend:8080
+          scheme: http
+
+  # Routes. Each becomes a [[routes]] block. Matching: path_exact beats
+  # path_prefix; longest prefix wins; ties broken by order.
+  #   hosts        list of host matchers ("*.example.com" allowed)
+  #   methods      list (empty = any)
+  #   pathExact    exact path (mutually exclusive with pathPrefix)
+  #   pathPrefix   segment-aware prefix (default "/")
+  #   stripPrefix  remove from path before forwarding
+  #   timeoutMs    per-request timeout (504 on expiry)
+  #   maxBodyBytes request body cap (413 if exceeded)
+  #   auth         name of an authBlocks entry
+  #   upstream     pool name (required)
+  routes:
+    - hosts: ["example.com"]
+      pathPrefix: /
+      upstream: example
+
+  # Named JWT auth blocks; routes opt in via `auth: <name>`.
+  authBlocks: []

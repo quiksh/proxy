@@ -1,5 +1,6 @@
 /target
 /tls/
+.DS_Store
 scripts/test_keys/
 __pycache__/
 *.pyc

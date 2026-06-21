@@ -15,13 +15,18 @@
 #   SAN_HOSTS  comma-separated cert SANs       (default: proxmox.internal,plex.internal,truenas.internal,localhost)
 #   CERT_DAYS  cert validity                   (default: 365)
 #
+# Note: config/homelab.toml binds the standard HTTPS port 443, which is
+# privileged. Run this with sudo (or grant the binary
+# `setcap cap_net_bind_service=+ep`), or point CONFIG at a config using a high
+# port for an unprivileged run.
+#
 # Usage:
-#   ./scripts/run-homelab.sh
+#   sudo ./scripts/run-homelab.sh
 #   CONFIG=config/myconfig.toml ./scripts/run-homelab.sh
 #
 # Once it's running, test from another shell:
-#   curl -k --resolve proxmox.internal:8443:127.0.0.1 \
-#       https://proxmox.internal:8443/
+#   curl -k --resolve proxmox.internal:443:127.0.0.1 \
+#       https://proxmox.internal/
 #
 # Or add the hostnames to /etc/hosts for browser use:
 #   sudo sh -c 'echo "127.0.0.1 proxmox.internal plex.internal truenas.internal" >> /etc/hosts'

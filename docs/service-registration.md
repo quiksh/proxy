@@ -1,4 +1,7 @@
-# NATS-based service registration
+---
+title: NATS-based service registration
+description: Reconcile a NATS JetStream KV bucket into a pool with the optional nats feature.
+---
 
 NATS is a **first-class but optional** membership source for quik, gated behind a
 cargo feature. The default build carries no NATS code or dependency and gets its

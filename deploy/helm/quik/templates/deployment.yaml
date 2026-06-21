@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "quik.fullname" . }}
+  labels:
+    {{- include "quik.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "quik.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # quik has no runtime config reload: hashing the rendered ConfigMap into
+        # the pod template means a `config:` change rolls the Deployment, which
+        # is how a declarative topology edit actually takes effect.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "quik.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "quik.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: quik
+          image: {{ include "quik.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["--config", "/etc/quik/quik.toml"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: https
+              containerPort: {{ .Values.config.listener.port }}
+              protocol: TCP
+            - name: admin
+              containerPort: {{ .Values.config.admin.port }}
+              protocol: TCP
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/quik/quik.toml
+              subPath: quik.toml
+              readOnly: true
+            - name: tls
+              mountPath: /etc/quik/tls
+              readOnly: true
+            {{- if and .Values.nats.enabled .Values.nats.credsSecret }}
+            - name: nats-creds
+              mountPath: /etc/quik/nats
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "quik.fullname" . }}
+        - name: tls
+          secret:
+            secretName: {{ include "quik.tlsSecretName" . }}
+        {{- if and .Values.nats.enabled .Values.nats.credsSecret }}
+        - name: nats-creds
+          secret:
+            secretName: {{ .Values.nats.credsSecret }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

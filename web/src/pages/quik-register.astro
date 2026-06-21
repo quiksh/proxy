@@ -1,0 +1,195 @@
+---
+import { Icon } from "astro-icon/components";
+import Layout from "../layouts/Layout.astro";
+import CodeCard from "../components/CodeCard.astro";
+import { GITHUB_NATS_EXAMPLES_URL, GITHUB_REGISTER_URL } from "../lib/site";
+
+const registerToml = `[nats]
+url    = "\${NATS_URL:-nats://nats:4222}"
+bucket = "\${BUCKET:-quik_registrations}"
+# creds_file = "/etc/quik-register/nats.creds"  # decentralised-JWT; use a tls:// url
+
+[service]
+namespace = "shop"
+service   = "checkout"
+instance  = "\${HOSTNAME}"        # unique per replica
+address   = "checkout-1.svc:8080" # what quik routes to
+scheme    = "http"
+# weight   = 1
+# metadata = { zone = "rack-2", version = "v1" }
+
+# The liveness gate: decides whether this instance should STAY registered,
+# not whether traffic should route to it. Point it at a liveness endpoint,
+# distinct from the routing health-check quik runs itself.
+[liveness]
+enabled             = true
+protocol            = "http"      # http | https | tcp
+endpoint            = "/healthz?source=container"
+interval_secs       = 5           # probe + heartbeat cadence (auto-capped at TTL/3)
+healthy_threshold   = 1           # consecutive OK before (re)registering
+unhealthy_threshold = 2           # consecutive fails before deregistering
+startup_grace_secs  = 10          # warm-up: failures don't deregister yet`;
+
+const keyExample = `# the KV key this registration owns:
+reg.<namespace>.<service>.<instance>
+reg.shop.checkout.checkout-1`;
+
+const lifecycle = [
+  {
+    icon: "lucide:heart-pulse",
+    title: "Probe",
+    body: "Health-checks the instance on the cadence you set - an http/https GET or a bare tcp connect - against a liveness endpoint, not quik's routing probe.",
+  },
+  {
+    icon: "lucide:upload",
+    title: "Register",
+    body: "After healthy_threshold consecutive passes, writes reg.<ns>.<service>.<instance> with the routable address into the KV bucket.",
+  },
+  {
+    icon: "lucide:refresh-cw",
+    title: "Heartbeat",
+    body: "Each passing probe re-puts the key, renewing the TTL lease. The cadence is auto-capped at the bucket's TTL/3 so the key never lapses while healthy.",
+  },
+  {
+    icon: "lucide:trash-2",
+    title: "Deregister",
+    body: "After unhealthy_threshold fails - or on shutdown - it deletes the key. If the process dies outright, the lease simply expires and the watcher reaps it.",
+  },
+];
+---
+
+<Layout
+  title="quik-register - the registration sidecar"
+  description="quik-register is a small sidecar that health-checks a backend and registers it into a NATS JetStream KV bucket while healthy, so quik picks it up automatically."
+>
+  <article class="py-12 md:py-16">
+    <a
+      href="/service-registration"
+      class="inline-flex items-center text-sm text-slate-400 hover:text-white"
+    >
+      <Icon name="lucide:arrow-left" class="mr-2 h-4 w-4" />
+      Service registration
+    </a>
+
+    <header class="mt-8 max-w-3xl">
+      <p class="text-sm font-medium uppercase tracking-[0.24em] text-cyan-300">
+        quik-register
+      </p>
+      <h1
+        class="mt-3 text-4xl font-semibold leading-[1.05] tracking-[-0.045em] md:text-6xl"
+      >
+        A sidecar that keeps a backend honest.
+      </h1>
+      <p class="mt-6 text-lg leading-8 text-slate-300">
+        quik-register runs next to a service, gates registration on a liveness
+        probe, and heartbeats the lease while the service is healthy. When it
+        fails or shuts down, the key goes away and quik drains it - no manual
+        admin calls. A real service can also register in-process with async-nats;
+        the sidecar is the drop-in option.
+      </p>
+    </header>
+
+    <section class="mt-12">
+      <h2 class="text-2xl font-semibold tracking-[-0.03em]">The lifecycle</h2>
+      <div class="mt-6 grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
+        {
+          lifecycle.map((s, i) => (
+            <div class="relative rounded-2xl border border-white/10 bg-white/[0.03] p-5 backdrop-blur-xl">
+              <span class="absolute right-4 top-4 font-mono text-xs text-slate-600">
+                0{i + 1}
+              </span>
+              <Icon name={s.icon} class="mb-3 h-6 w-6 text-cyan-300" />
+              <h3 class="text-base font-semibold tracking-tight">{s.title}</h3>
+              <p class="mt-2 text-sm leading-6 text-slate-400">{s.body}</p>
+            </div>
+          ))
+        }
+      </div>
+    </section>
+
+    <section class="mt-14 grid gap-8 lg:grid-cols-[1.05fr_0.95fr] lg:items-start">
+      <div>
+        <h2 class="text-2xl font-semibold tracking-[-0.03em]">Configure it</h2>
+        <p class="mt-3 leading-8 text-slate-400">
+          One TOML file. Per-replica fields are env-templated
+          (<code class="rounded bg-white/10 px-1.5 py-0.5 text-[0.85em] text-slate-200"
+            >{"${VAR:-default}"}</code
+          >), so the same file serves every instance. The registrar writes a
+          single key derived from <code
+            class="rounded bg-white/10 px-1.5 py-0.5 text-[0.85em] text-slate-200"
+            >namespace</code
+          >, <code
+            class="rounded bg-white/10 px-1.5 py-0.5 text-[0.85em] text-slate-200"
+            >service</code
+          >, and <code
+            class="rounded bg-white/10 px-1.5 py-0.5 text-[0.85em] text-slate-200"
+            >instance</code
+          >.
+        </p>
+        <CodeCard caption="key" icon="lucide:key" code={keyExample} class="mt-6" />
+      </div>
+      <CodeCard caption="quik-register.toml" code={registerToml} dots />
+    </section>
+
+    <section
+      class="mt-14 rounded-[1.5rem] border border-white/10 bg-white/[0.03] p-6 backdrop-blur-xl md:p-8"
+    >
+      <div class="flex items-start gap-3">
+        <Icon
+          name="lucide:info"
+          class="mt-1 h-5 w-5 shrink-0 text-cyan-300"
+        />
+        <div>
+          <h2 class="text-lg font-semibold tracking-tight">
+            Liveness ≠ readiness
+          </h2>
+          <p class="mt-2 leading-7 text-slate-400">
+            The sidecar's probe decides whether an instance should <em
+              >stay in the registry at all</em
+            > - deliberately a different question from quik's own <code
+              class="rounded bg-white/10 px-1.5 py-0.5 text-[0.85em] text-slate-200"
+              >[upstreams.active_health]</code
+            >, which decides whether to <em>route</em> to it. The same split ECS
+            draws between container health and target-group health. Point
+            liveness at a container endpoint; leave readiness to quik.
+          </p>
+          <p class="mt-3 leading-7 text-slate-400">
+            In a shared-fate topology - sidecar in the same Pod/task, or bundled
+            in one container - set <code
+              class="rounded bg-white/10 px-1.5 py-0.5 text-[0.85em] text-slate-200"
+              >enabled = false</code
+            >: process death already stops the heartbeat, and the lease TTL reaps
+            the instance. Left on, it is defence-in-depth that also catches an
+            alive-but-wedged instance.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <div class="mt-12 flex flex-wrap gap-4">
+      <a
+        href="/nats-deployment"
+        class="inline-flex items-center justify-center rounded-xl bg-cyan-300 px-5 py-3 font-semibold text-slate-950 hover:bg-cyan-200"
+      >
+        Deploy it in a stack
+        <Icon name="lucide:arrow-right" class="ml-2 h-4 w-4" />
+      </a>
+      <a
+        href={GITHUB_REGISTER_URL}
+        target="_blank"
+        rel="noreferrer"
+        class="inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/[0.04] px-5 py-3 font-semibold text-white hover:bg-white/10"
+      >
+        Source: quik-register/
+      </a>
+      <a
+        href={GITHUB_NATS_EXAMPLES_URL}
+        target="_blank"
+        rel="noreferrer"
+        class="inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/[0.04] px-5 py-3 font-semibold text-white hover:bg-white/10"
+      >
+        Example configs
+      </a>
+    </div>
+  </article>
+</Layout>

@@ -1,0 +1,184 @@
+---
+import { Icon } from "astro-icon/components";
+import Layout from "../layouts/Layout.astro";
+import CodeCard from "../components/CodeCard.astro";
+import { GITHUB_DOCS_URL } from "../lib/site";
+
+const baseConfig = `mode = "edge"
+
+[listener]
+bind = "0.0.0.0:443"
+
+[listener.tls]
+# gen-dev-cert.sh, or a real cert with SANs for each *.internal host
+cert_path = "./tls/cert.pem"
+key_path  = "./tls/key.pem"
+
+[admin]
+bind = "127.0.0.1:9090"
+
+[logging]
+level  = "info,quik=info"
+format = "key_value"   # human-readable; switch to "json" for log-shippers`;
+
+const upstreams = `# Proxmox - HTTPS on 8006 with a self-signed cert, HTTP/1.1
+[[upstreams]]
+name = "proxmox"
+members = [{ address = "192.168.1.2:8006", scheme = "https" }]
+[upstreams.tls]
+skip_verify = true
+
+# Plex - plain HTTP on its management port
+[[upstreams]]
+name = "plex"
+members = [{ address = "192.168.1.145:32400", scheme = "http" }]
+
+# TrueNAS - HTTPS UI on 443 with a self-signed cert
+[[upstreams]]
+name = "truenas"
+members = [{ address = "192.168.1.28:443", scheme = "https" }]
+[upstreams.tls]
+skip_verify = true`;
+
+const routes = `# One route per service, matched by hostname.
+[[routes]]
+hosts       = ["proxmox.internal"]
+path_prefix = "/"
+upstream    = "proxmox"
+# Proxmox's noVNC / xterm.js consoles use WebSockets; quik forwards
+# Upgrade requests transparently, so consoles Just Work. No extra config.
+
+[[routes]]
+hosts       = ["plex.internal"]
+path_prefix = "/"
+upstream    = "plex"
+
+[[routes]]
+hosts       = ["truenas.internal"]
+path_prefix = "/"
+upstream    = "truenas"`;
+
+const points = [
+  {
+    icon: "lucide:globe",
+    title: "Route by hostname",
+    body: "proxmox.internal / plex.internal / truenas.internal all resolve (via /etc/hosts, internal DNS, or Pi-hole) to the host running quik. One TLS cert with a SAN per name.",
+  },
+  {
+    icon: "lucide:shield-off",
+    title: "Trust self-signed backends",
+    body: "Proxmox and TrueNAS ship self-signed certs. Set scheme = \"https\" and skip_verify = true per upstream so quik connects without choking on the cert.",
+  },
+  {
+    icon: "lucide:cable",
+    title: "WebSockets pass through",
+    body: "Upgrade requests are forwarded transparently - Proxmox consoles and other live connections work with no extra config.",
+  },
+  {
+    icon: "lucide:corner-up-right",
+    title: "Mind absolute redirects",
+    body: "quik doesn't rewrite Location headers or bodies. If a backend emits absolute-URL redirects, fix it backend-side (relative redirects, or set its external-URL).",
+  },
+];
+---
+
+<Layout
+  title="Homelab reverse proxy config - quik.sh"
+  description="A worked homelab quik.toml: TLS termination in front of Proxmox, Plex, and TrueNAS, routed by hostname, with self-signed backends and transparent WebSockets."
+>
+  <article class="py-12 md:py-16">
+    <a
+      href="/"
+      class="inline-flex items-center text-sm text-slate-400 hover:text-white"
+    >
+      <Icon name="lucide:arrow-left" class="mr-2 h-4 w-4" />
+      Back home
+    </a>
+
+    <header class="mt-8 max-w-3xl">
+      <p class="text-sm font-medium uppercase tracking-[0.24em] text-cyan-300">
+        Homelab
+      </p>
+      <h1
+        class="mt-3 text-4xl font-semibold leading-[1.05] tracking-[-0.045em] md:text-6xl"
+      >
+        One TLS endpoint for the whole rack.
+      </h1>
+      <p class="mt-6 text-lg leading-8 text-slate-300">
+        A worked config putting quik in front of Proxmox, Plex, and TrueNAS.
+        Clients hit <code
+          class="rounded bg-white/10 px-1.5 py-0.5 text-[0.85em] text-slate-200"
+          >https://&lt;service&gt;.internal</code
+        > and quik terminates TLS once, then fans out to each backend by
+        hostname.
+      </p>
+    </header>
+
+    <div class="mt-12 grid gap-5 sm:grid-cols-2">
+      {
+        points.map((p) => (
+          <div class="rounded-2xl border border-white/10 bg-white/[0.03] p-6 backdrop-blur-xl">
+            <Icon name={p.icon} class="mb-4 h-6 w-6 text-cyan-300" />
+            <h2 class="text-lg font-semibold tracking-tight">{p.title}</h2>
+            <p class="mt-2 leading-7 text-slate-400">{p.body}</p>
+          </div>
+        ))
+      }
+    </div>
+
+    <section class="mt-14">
+      <h2 class="text-2xl font-semibold tracking-[-0.03em]">
+        1. Listener, TLS, and admin
+      </h2>
+      <p class="mt-3 max-w-3xl leading-8 text-slate-400">
+        Terminate TLS on <code
+          class="rounded bg-white/10 px-1.5 py-0.5 text-[0.85em] text-slate-200"
+          >:443</code
+        > and keep the admin listener bound to localhost.
+      </p>
+      <CodeCard caption="quik.toml" code={baseConfig} dots class="mt-6" />
+    </section>
+
+    <section class="mt-12">
+      <h2 class="text-2xl font-semibold tracking-[-0.03em]">
+        2. One upstream per service
+      </h2>
+      <p class="mt-3 max-w-3xl leading-8 text-slate-400">
+        Each backend is a single-member pool. Set the scheme quik should speak
+        to it, and skip verification for the self-signed boxes.
+      </p>
+      <CodeCard caption="quik.toml" code={upstreams} class="mt-6" />
+    </section>
+
+    <section class="mt-12">
+      <h2 class="text-2xl font-semibold tracking-[-0.03em]">
+        3. Route by hostname
+      </h2>
+      <p class="mt-3 max-w-3xl leading-8 text-slate-400">
+        A catch-all prefix route per host points at the matching upstream.
+      </p>
+      <CodeCard caption="quik.toml" code={routes} class="mt-6" />
+    </section>
+
+    <div
+      class="mt-14 flex flex-col gap-4 rounded-[1.5rem] border border-cyan-300/20 bg-cyan-300/[0.06] p-6 sm:flex-row sm:items-center sm:justify-between md:p-8"
+    >
+      <div>
+        <h2 class="text-xl font-semibold tracking-tight">Going further</h2>
+        <p class="mt-1 leading-7 text-slate-400">
+          Add JWT auth, body-size caps, prefix stripping, or active health
+          checks per route as the homelab grows.
+        </p>
+      </div>
+      <a
+        href={GITHUB_DOCS_URL + "/homelab.md"}
+        target="_blank"
+        rel="noreferrer"
+        class="inline-flex items-center justify-center rounded-xl bg-cyan-300 px-5 py-3 font-semibold text-slate-950 hover:bg-cyan-200"
+      >
+        Homelab guide
+        <Icon name="lucide:arrow-right" class="ml-2 h-4 w-4" />
+      </a>
+    </div>
+  </article>
+</Layout>

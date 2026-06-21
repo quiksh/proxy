@@ -1,4 +1,7 @@
-# Homelab reverse proxy
+---
+title: Homelab reverse proxy
+description: Put quik in front of a handful of self-hosted services and terminate TLS once.
+---
 
 A homelab usually has a handful of services running on different boxes -
 Proxmox at one IP, Plex at another, TrueNAS somewhere else - each on its own
@@ -10,9 +13,9 @@ The whole setup is one config file and a shell script.
 
 ## What you'll end up with
 
-- `https://proxmox.internal:8443/` → Proxmox UI on 192.168.x.x:8006
-- `https://plex.internal:8443/` → Plex on 192.168.x.x:32400
-- `https://truenas.internal:8443/` → TrueNAS UI on 192.168.x.x:443
+- `https://proxmox.internal/` → Proxmox UI on 192.168.x.x:8006
+- `https://plex.internal/` → Plex on 192.168.x.x:32400
+- `https://truenas.internal/` → TrueNAS UI on 192.168.x.x:443
 
 One cert, valid for all three hostnames. WebSocket consoles (Proxmox noVNC,
 xterm.js) Just Work. Backend self-signed certs are accepted with
@@ -87,7 +90,7 @@ hostname and starts the proxy:
 ./scripts/run-homelab.sh
 ```
 
-That's it. Visit `https://proxmox.internal:8443/` (after accepting the
+That's it. Visit `https://proxmox.internal/` (after accepting the
 self-signed cert once) and you should see Proxmox.
 
 If you'd rather run quik manually:

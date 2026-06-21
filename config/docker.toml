@@ -5,7 +5,7 @@
 mode = "edge"
 
 [listener]
-bind = "0.0.0.0:8443"
+bind = "0.0.0.0:443"
 
 [listener.tls]
 cert_path = "/etc/quik/tls/cert.pem"

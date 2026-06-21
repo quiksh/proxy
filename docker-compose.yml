@@ -5,8 +5,8 @@
 #   2. docker compose up --build
 #
 # Then hit:
-#   curl -k https://localhost:8443/echo/anything
-#   curl    http://localhost:9090/metrics
+#   curl -k https://localhost/echo/anything
+#   curl    http://127.0.0.1:9090/metrics
 #
 # Override backend targets without editing the config:
 #   BACKEND_A_ADDR=10.0.0.5:80 BACKEND_B_ADDR=10.0.0.6:80 docker compose up
@@ -18,8 +18,10 @@ services:
       target: quik-runtime
     image: quik:dev
     ports:
-      - "8443:8443"
-      - "9090:9090"
+      # TLS on the standard HTTPS port. The admin port is bound to the host's
+      # loopback only — never expose the admin API to the network.
+      - "443:443"
+      - "127.0.0.1:9090:9090"
     environment:
       BACKEND_A_ADDR: ${BACKEND_A_ADDR:-backend-a:8080}
       BACKEND_B_ADDR: ${BACKEND_B_ADDR:-backend-b:8080}

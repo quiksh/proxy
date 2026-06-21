@@ -1,0 +1,117 @@
+---
+import { Icon } from "astro-icon/components";
+import Layout from "../layouts/Layout.astro";
+import { GITHUB_NATS_EXAMPLES_URL } from "../lib/site";
+
+const cards = [
+  {
+    icon: "lucide:boxes",
+    title: "Two build profiles",
+    body: "The default build gets membership from the config file and admin API - no NATS code linked at all. A --features nats build adds an in-process watcher that runs only when a [nats] block is present.",
+  },
+  {
+    icon: "lucide:workflow",
+    title: "In-process, no bridge",
+    body: "Each quik instance watches the bucket itself and reconciles into its own pool. NATS fans one kv.put out to every watcher - no shared component, and quik can always self-heal to the desired state.",
+  },
+  {
+    icon: "lucide:refresh-cw",
+    title: "TTL is the liveness lease",
+    body: "Services write their own key and refresh it to stay alive; the watcher reaps members whose lease lapses. Static config members are always the floor - the watcher is purely additive.",
+  },
+  {
+    icon: "lucide:key-round",
+    title: "Scoped permissions",
+    body: "Services can write only their own key. Operators get a separate override namespace for durable drain and cordon intent, and the admin API is just a friendlier face over those same overrides.",
+  },
+];
+---
+
+<Layout
+  title="Service registration - quik.sh"
+  description="How quik backends register themselves into a NATS JetStream KV bucket: build profiles, the in-process watcher, TTL leases, and scoped permissions."
+>
+  <article class="py-12 md:py-16">
+    <a
+      href="/"
+      class="inline-flex items-center text-sm text-slate-400 hover:text-white"
+    >
+      <Icon name="lucide:arrow-left" class="mr-2 h-4 w-4" />
+      Back home
+    </a>
+
+    <header class="mt-8 max-w-3xl">
+      <p class="text-sm font-medium uppercase tracking-[0.24em] text-cyan-300">
+        Service registration
+      </p>
+      <h1
+        class="mt-3 text-4xl font-semibold leading-[1.05] tracking-[-0.045em] md:text-6xl"
+      >
+        Backends that register themselves.
+      </h1>
+      <p class="mt-6 text-lg leading-8 text-slate-300">
+        NATS is a first-class but optional membership source for quik. The
+        default build is lean and dependency-free; opt in at build time and
+        backends self-register into a JetStream KV bucket that quik reconciles
+        into its live pool.
+      </p>
+    </header>
+
+    <div class="mt-12 grid gap-5 sm:grid-cols-2">
+      {
+        cards.map((c) => (
+          <div class="rounded-2xl border border-white/10 bg-white/[0.03] p-6 backdrop-blur-xl">
+            <Icon name={c.icon} class="mb-4 h-6 w-6 text-cyan-300" />
+            <h2 class="text-lg font-semibold tracking-tight">{c.title}</h2>
+            <p class="mt-2 leading-7 text-slate-400">{c.body}</p>
+          </div>
+        ))
+      }
+    </div>
+
+    <section class="mt-14">
+      <h2 class="text-2xl font-semibold tracking-[-0.03em]">How state flows</h2>
+      <p class="mt-3 max-w-3xl leading-8 text-slate-400">
+        A service writes its own key into the bucket; an operator can write an
+        override key alongside it. The bucket is the desired state. Every quik
+        instance watches it independently and folds each put, delete, and TTL
+        expiry into its own live member set. Nothing has to call quik's admin API
+        from the outside, and each proxy converges on its own.
+      </p>
+    </section>
+
+    <div
+      class="mt-14 flex flex-col gap-4 rounded-[1.5rem] border border-cyan-300/20 bg-cyan-300/[0.06] p-6 sm:flex-row sm:items-center sm:justify-between md:p-8"
+    >
+      <div>
+        <h2 class="text-xl font-semibold tracking-tight">Wire it up</h2>
+        <p class="mt-1 leading-7 text-slate-400">
+          Run the sidecar on each backend, then deploy a stack.
+        </p>
+      </div>
+      <div class="flex flex-col gap-3 sm:flex-row">
+        <a
+          href="/quik-register"
+          class="inline-flex items-center justify-center rounded-xl bg-cyan-300 px-5 py-3 font-semibold text-slate-950 hover:bg-cyan-200"
+        >
+          quik-register
+          <Icon name="lucide:arrow-right" class="ml-2 h-4 w-4" />
+        </a>
+        <a
+          href="/nats-deployment"
+          class="inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/[0.04] px-5 py-3 font-semibold text-white hover:bg-white/10"
+        >
+          Deploy a stack
+        </a>
+        <a
+          href={GITHUB_NATS_EXAMPLES_URL}
+          target="_blank"
+          rel="noreferrer"
+          class="inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/[0.04] px-5 py-3 font-semibold text-white hover:bg-white/10"
+        >
+          Example stacks
+        </a>
+      </div>
+    </div>
+  </article>
+</Layout>

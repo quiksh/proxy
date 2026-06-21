@@ -50,7 +50,7 @@ RUN find src benches examples tests quik-register -name '*.rs' -exec touch {} + 
 FROM debian:${DEBIAN_VERSION}-slim AS quik-runtime
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates \
+ && apt-get install -y --no-install-recommends ca-certificates libcap2-bin \
  && rm -rf /var/lib/apt/lists/* \
  && useradd -r -s /usr/sbin/nologin -u 10001 quik \
  && mkdir -p /etc/quik /etc/quik/tls \
@@ -58,9 +58,14 @@ RUN apt-get update \
 
 COPY --from=builder /build/target/release/quik /usr/local/bin/quik
 
+# Allow the non-root `quik` user to bind the privileged TLS port (443). The file
+# capability is in Docker's default bounding set, so no `cap_add` is needed at
+# `docker run` time. quik still runs as uid 10001, not root.
+RUN setcap 'cap_net_bind_service=+ep' /usr/local/bin/quik
+
 USER quik
 WORKDIR /etc/quik
-EXPOSE 8443 9090
+EXPOSE 443 9090
 ENTRYPOINT ["/usr/local/bin/quik"]
 CMD ["--config", "/etc/quik/quik.toml"]
 

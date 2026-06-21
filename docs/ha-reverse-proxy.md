@@ -1,4 +1,7 @@
-# HA reverse proxy
+---
+title: HA reverse proxy
+description: "quik in front of pools of backends: host and path routing, health checks, and graceful drain."
+---
 
 The setup most people reach for: quik in front of one or more pools of
 backends, routing by host and path, with health checks pulling failing
@@ -34,7 +37,7 @@ Two backends, round-robin between them, passive health pulls bad ones out:
 mode = "edge"
 
 [listener]
-bind = "0.0.0.0:8443"
+bind = "0.0.0.0:443"
 
 [listener.tls]
 cert_path = "/etc/quik/tls/cert.pem"
@@ -236,11 +239,21 @@ On every forwarded request, quik adds:
 
 | Header              | Source                                                                              |
 |---------------------|-------------------------------------------------------------------------------------|
-| `X-Request-ID`      | Inbound header if present, else generated (CSPRNG, 16 bytes).                       |
-| `traceparent`       | Inbound header if valid W3C format, else generated.                                 |
+| `X-Request-ID`      | Inbound header honoured only from a *trusted* peer; otherwise replaced with a generated id (CSPRNG, 16 bytes). |
+| `traceparent`       | Inbound header honoured only from a *trusted* peer **and** when it is valid W3C format; otherwise generated. |
 | `X-Forwarded-For`   | `mode = "edge"`: replaces inbound. `mode = "host"`: appends client IP to the chain. |
 | `X-Forwarded-Host`  | The `Host` header the client sent.                                                  |
 | `X-Forwarded-Proto` | `https` (inbound is always TLS).                                                    |
+
+A peer is *trusted* by the same rule the forwarding headers use: `mode = "host"`,
+or `mode = "edge"` with the immediate peer inside `[forwarded].trusted_proxies`.
+So the correlation identifiers (`X-Request-ID`, `traceparent`) follow the same
+trust model as `X-Forwarded-For`: a value from a trusted peer is propagated
+end-to-end (so an upstream CDN/LB/gateway can set the id and have quik's logs
+share it), but a value from an untrusted edge client is discarded and a fresh
+one generated. That stops an open-internet client from poisoning correlation
+(reusing or forging another request's id) or forcing trace sampling via an
+injected `traceparent`.
 
 `mode = "edge"` is the right default when quik sits at the network boundary
 - it normalises whatever a client might have sent. Use `mode = "host"` when

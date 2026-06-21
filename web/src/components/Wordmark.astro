@@ -1,0 +1,17 @@
+---
+// The quik.sh logo + wordmark lockup. Used by both the nav and the footer so
+// the icon size, corner radius, and icon-to-text spacing stay identical in
+// both places (they used to drift: gap-3/h-9 in the nav, gap-2/h-6 in the
+// footer). Pass extra classes through for layout/colour tweaks per slot.
+interface Props {
+  class?: string;
+}
+const { class: className } = Astro.props;
+---
+
+<a href="/" class:list={["flex items-center gap-3", className]}>
+  <img src="/quik-logo.svg" alt="quik.sh" class="h-9 w-9 rounded-xl" />
+  <span class="text-lg font-semibold tracking-tight text-white">
+    quik<span class="text-cyan-300">.sh</span>
+  </span>
+</a>

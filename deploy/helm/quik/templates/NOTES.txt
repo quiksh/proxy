@@ -1,0 +1,27 @@
+quik has been deployed as {{ include "quik.fullname" . }}.
+
+Service: {{ .Values.service.type }} on port {{ .Values.service.port }} (TLS).
+{{- if eq .Values.service.type "LoadBalancer" }}
+
+Get the external address:
+  kubectl get svc {{ include "quik.fullname" . }} -n {{ .Release.Namespace }} -w
+{{- end }}
+
+Routes configured:
+{{- range .Values.config.routes }}
+  - {{ range .hosts }}{{ . }} {{ end }}{{ .pathExact | default (.pathPrefix | default "/") }} -> {{ .upstream }}
+{{- end }}
+
+Reminder: quik has no runtime config reload. A change to `config:` (routes or
+pools) rolls the Deployment automatically via a config-checksum annotation.
+Pool *membership* can still change at runtime (admin API, or NATS if enabled)
+without a restart.
+
+{{- if not .Values.tls.certManager.enabled }}
+
+TLS: mounting pre-existing secret {{ .Values.tls.secretName | quote }}.
+Ensure it is a kubernetes.io/tls secret with tls.crt and tls.key.
+{{- else }}
+
+TLS: cert-manager will issue a certificate into secret {{ include "quik.fullname" . }}-tls.
+{{- end }}

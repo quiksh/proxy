@@ -1,4 +1,7 @@
-# Forward (egress) proxy
+---
+title: Forward (egress) proxy
+description: Run quik as an HTTP CONNECT egress proxy with host and CIDR allow-listing and SNI checks.
+---
 
 quik can run a second listener that accepts HTTP `CONNECT` requests and
 tunnels them to allowed destinations. It's the same binary as the reverse
@@ -165,15 +168,23 @@ quik reverse proxy too, and use JWT auth there.
 
 Egress emits its own metrics:
 
-| Metric                          | Type    | Labels                                |
-|---------------------------------|---------|---------------------------------------|
-| `quik_egress_total`             | counter | `action` (`allow`/`deny`/`rejected_method`/`auth_failed`/...) |
-| `quik_egress_bytes_client_total` | counter | client→destination bytes              |
-| `quik_egress_bytes_server_total` | counter | destination→client bytes              |
-| `quik_egress_active`            | gauge   | tunnels currently open                |
+| Metric                             | Type    | Labels                                   |
+|------------------------------------|---------|------------------------------------------|
+| `quik_egress_connects_total`       | counter | `action` (`allow` / `deny` / `rejected_method`), `target` |
+| `quik_egress_bytes_sent_total`     | counter | `target` (client→destination bytes)      |
+| `quik_egress_bytes_received_total` | counter | `target` (destination→client bytes)      |
 
-Every CONNECT attempt logs once at INFO, with `target`, `action`,
-`originator`, `decision`, `sni`, `peer`. Denied requests log at WARN.
+The `target` label is the destination host - but **only for allowed
+connects**, where the set of hosts is bounded by your allow-list. Denied and
+rejected connects use `target = "-"`, so a caller can't blow up metric
+cardinality by spraying CONNECTs at unique hostnames. The denied host is still
+in the access log. Upstream dial failures are counted under
+`quik_proxy_errors_total{kind="egress_connect"|"egress_connect_timeout"}`.
+
+Every CONNECT attempt logs once on the `quik::egress` target at INFO (both
+`allow` and `deny`), carrying `peer`, `target`, `action`, the resolved IPs, and
+`duration_ms`; the `originator` rides the span when proxy auth is configured.
+Upstream connect failures and timeouts log at WARN.
 
 ## Running egress alongside the reverse proxy
 
@@ -184,7 +195,7 @@ same admin listener. A combined config looks like:
 mode = "edge"
 
 [listener]
-bind = "0.0.0.0:8443"
+bind = "0.0.0.0:443"
 [listener.tls]
 cert_path = "/etc/quik/tls/cert.pem"
 key_path  = "/etc/quik/tls/key.pem"

@@ -1,4 +1,7 @@
-# Admin API - online management
+---
+title: Admin API
+description: Add, drain, and remove upstream members on a running proxy, plus hot config reload - over a separate HTTP admin listener.
+---
 
 The admin listener serves three things:
 

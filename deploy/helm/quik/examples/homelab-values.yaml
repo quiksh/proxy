@@ -1,0 +1,41 @@
+# Multi-site homelab example - the same fan-out you'd express in nginx, declared
+# as quik routes + pools. One host -> one pool -> one backend service.
+#
+#   helm install edge ./deploy/helm/quik -f examples/homelab-values.yaml \
+#     --set tls.certManager.enabled=true \
+#     --set tls.certManager.issuerRef.name=letsencrypt-prod
+
+replicaCount: 2
+
+tls:
+  # cert-manager issues a SAN cert covering every route host below.
+  certManager:
+    enabled: true
+    issuerRef:
+      name: letsencrypt-prod
+      kind: ClusterIssuer
+
+config:
+  upstreams:
+    - name: web
+      members: [{ address: web:3000 }]
+    - name: api
+      members: [{ address: api:8080 }]
+    - name: auth
+      members: [{ address: auth:8080 }]
+    - name: blog
+      members: [{ address: blog:2368 }]
+    - name: wiki
+      members: [{ address: wiki:80 }]
+
+  routes:
+    - hosts: ["example.com", "www.example.com"]
+      upstream: web
+    - hosts: ["api.example.com"]
+      upstream: api
+    - hosts: ["auth.example.com"]
+      upstream: auth
+    - hosts: ["blog.example.com"]
+      upstream: blog
+    - hosts: ["wiki.example.com"]
+      upstream: wiki

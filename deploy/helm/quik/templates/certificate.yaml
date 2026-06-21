@@ -1,0 +1,30 @@
+{{- if .Values.tls.certManager.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "quik.fullname" . }}
+  labels:
+    {{- include "quik.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "quik.tlsSecretName" . }}
+  {{- $hosts := .Values.tls.certManager.dnsNames }}
+  {{- if not $hosts }}
+  {{- $hosts = list }}
+  {{- range .Values.config.routes }}
+  {{- range .hosts }}
+  {{- $hosts = append $hosts . }}
+  {{- end }}
+  {{- end }}
+  {{- end }}
+  commonName: {{ .Values.tls.certManager.commonName | default (first $hosts) }}
+  dnsNames:
+    {{- range $hosts }}
+    - {{ . | quote }}
+    {{- end }}
+  duration: {{ .Values.tls.certManager.duration }}
+  renewBefore: {{ .Values.tls.certManager.renewBefore }}
+  issuerRef:
+    name: {{ required "tls.certManager.issuerRef.name is required" .Values.tls.certManager.issuerRef.name }}
+    kind: {{ .Values.tls.certManager.issuerRef.kind }}
+    group: {{ .Values.tls.certManager.issuerRef.group }}
+{{- end }}
