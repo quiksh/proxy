@@ -13,13 +13,17 @@ The whole setup is one config file and a shell script.
 
 ## What you'll end up with
 
-- `https://proxmox.internal/` → Proxmox UI on 192.168.x.x:8006
-- `https://plex.internal/` → Plex on 192.168.x.x:32400
-- `https://truenas.internal/` → TrueNAS UI on 192.168.x.x:443
+- `https://proxmox.internal:8443/` → Proxmox UI on 192.168.x.x:8006
+- `https://plex.internal:8443/` → Plex on 192.168.x.x:32400
+- `https://truenas.internal:8443/` → TrueNAS UI on 192.168.x.x:443
 
 One cert, valid for all three hostnames. WebSocket consoles (Proxmox noVNC,
 xterm.js) Just Work. Backend self-signed certs are accepted with
 `skip_verify`.
+
+quik binds the unprivileged `:8443`, so it runs directly on the host without
+`sudo` or `setcap`. Want the bare `https://<service>.internal` on port 443?
+Publish it with a Docker port mapping or a firewall redirect (443 → 8443).
 
 ## Step 1 - DNS
 
@@ -90,7 +94,7 @@ hostname and starts the proxy:
 ./scripts/run-homelab.sh
 ```
 
-That's it. Visit `https://proxmox.internal/` (after accepting the
+That's it. Visit `https://proxmox.internal:8443/` (after accepting the
 self-signed cert once) and you should see Proxmox.
 
 If you'd rather run quik manually:

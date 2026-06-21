@@ -2,7 +2,7 @@
 #
 # Routing is by hostname - proxmox.internal / plex.internal / truenas.internal
 # must all resolve (via /etc/hosts, internal DNS, or a Pi-hole-style resolver)
-# to the host running quik. Clients then hit  https://<service>.internal
+# to the host running quik. Clients then hit  https://<service>.internal:8443
 # and the proxy fans out to the real backend address.
 #
 # Each backend's `Host` header in the forwarded request becomes the upstream's
@@ -17,7 +17,10 @@
 mode = "edge"
 
 [listener]
-bind = "0.0.0.0:443"
+# Unprivileged port, so no sudo / setcap needed to run quik directly on the
+# host. Reach services at https://<service>.internal:8443 (or publish 443 via
+# a Docker port mapping / firewall redirect if you want the bare URL).
+bind = "0.0.0.0:8443"
 
 [listener.tls]
 # Use ./scripts/gen-dev-cert.sh to generate, or drop in a real cert (Let's

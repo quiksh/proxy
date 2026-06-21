@@ -13,7 +13,7 @@ import {
 const config = `mode = "edge"
 
 [listener]
-bind = "0.0.0.0:443"
+bind = "0.0.0.0:8443"
 
 [listener.tls]
 cert_path = "./tls/cert.pem"
@@ -32,7 +32,7 @@ hosts       = ["api.example.com"]
 path_prefix = "/"
 upstream    = "api"`;
 
-const dockerRun = `docker run --rm -p 443:443 -p 127.0.0.1:9090:9090 \\
+const dockerRun = `docker run --rm -p 443:8443 -p 127.0.0.1:9090:9090 \\
   -v ./quik.toml:/etc/quik/quik.toml \\
   -v ./tls:/etc/quik/tls \\
   ${GHCR_IMAGE}:latest`;

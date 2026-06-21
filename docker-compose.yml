@@ -18,9 +18,10 @@ services:
       target: quik-runtime
     image: quik:dev
     ports:
-      # TLS on the standard HTTPS port. The admin port is bound to the host's
+      # quik binds the unprivileged :8443 inside the container; publish it on
+      # the host's standard HTTPS port. The admin port is bound to the host's
       # loopback only — never expose the admin API to the network.
-      - "443:443"
+      - "443:8443"
       - "127.0.0.1:9090:9090"
     environment:
       BACKEND_A_ADDR: ${BACKEND_A_ADDR:-backend-a:8080}

@@ -7,7 +7,9 @@ import { GITHUB_DOCS_URL } from "../lib/site";
 const baseConfig = `mode = "edge"
 
 [listener]
-bind = "0.0.0.0:443"
+# Unprivileged port - no sudo/setcap to run on the host. Reach services at
+# https://<service>.internal:8443 (or publish 443 via a port mapping).
+bind = "0.0.0.0:8443"
 
 [listener.tls]
 # gen-dev-cert.sh, or a real cert with SANs for each *.internal host
@@ -108,7 +110,7 @@ const points = [
         A worked config putting quik in front of Proxmox, Plex, and TrueNAS.
         Clients hit <code
           class="rounded bg-white/10 px-1.5 py-0.5 text-[0.85em] text-slate-200"
-          >https://&lt;service&gt;.internal</code
+          >https://&lt;service&gt;.internal:8443</code
         > and quik terminates TLS once, then fans out to each backend by
         hostname.
       </p>
@@ -131,10 +133,11 @@ const points = [
         1. Listener, TLS, and admin
       </h2>
       <p class="mt-3 max-w-3xl leading-8 text-slate-400">
-        Terminate TLS on <code
+        Terminate TLS on the unprivileged <code
           class="rounded bg-white/10 px-1.5 py-0.5 text-[0.85em] text-slate-200"
-          >:443</code
-        > and keep the admin listener bound to localhost.
+          >:8443</code
+        > (no sudo to run on the host) and keep the admin listener bound to
+        localhost.
       </p>
       <CodeCard caption="quik.toml" code={baseConfig} dots class="mt-6" />
     </section>
