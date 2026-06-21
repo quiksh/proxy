@@ -1,0 +1,339 @@
+---
+import { Icon } from "astro-icon/components";
+import Layout from "../layouts/Layout.astro";
+import CodeCard from "../components/CodeCard.astro";
+import {
+  GHCR_IMAGE,
+  GITHUB_DOCS_URL,
+  GITHUB_EXAMPLES_URL,
+  GITHUB_QUICKSTART_URL,
+  GITHUB_URL,
+} from "../lib/site";
+
+const config = `mode = "edge"
+
+[listener]
+bind = "0.0.0.0:8443"
+
+[listener.tls]
+cert_path = "./tls/cert.pem"
+key_path  = "./tls/key.pem"
+
+[[upstreams]]
+name = "api"
+balancer = "least_connections"
+members = [
+  { address = "10.0.0.5:8080" },
+  { address = "10.0.0.6:8080" },
+]
+
+[[routes]]
+hosts       = ["api.example.com"]
+path_prefix = "/"
+upstream    = "api"`;
+
+const dockerRun = `docker run --rm -p 443:8443 -p 127.0.0.1:9090:9090 \\
+  -v ./quik.toml:/etc/quik/quik.toml \\
+  -v ./tls:/etc/quik/tls \\
+  ${GHCR_IMAGE}:latest`;
+
+const featureTiles = [
+  {
+    icon: "lucide:git-branch",
+    title: "Route by host and path",
+    body: "Exact paths, segment-aware prefixes, methods, and hostnames. Most specific match wins, longest prefix first.",
+  },
+  {
+    icon: "lucide:activity",
+    title: "Health-aware balancing",
+    body: "Round-robin, random, or least-connections, with passive failure ejection and optional active probes.",
+  },
+  {
+    icon: "lucide:lock",
+    title: "JWT auth at the edge",
+    body: "Validate tokens against JWKS with auto-refresh, then project verified claims into upstream headers.",
+  },
+  {
+    icon: "lucide:shield-check",
+    title: "TLS without OpenSSL",
+    body: "Terminate TLS with rustls. HTTP/1.1 and HTTP/2 negotiate over ALPN; WebSockets, SSE, and gRPC pass straight through.",
+  },
+  {
+    icon: "lucide:refresh-cw",
+    title: "Drain without downtime",
+    body: "Add, drain, or remove backends through the admin API. No restarts, no dropped requests.",
+  },
+  {
+    icon: "lucide:line-chart",
+    title: "See everything",
+    body: "Prometheus metrics, structured JSON logs, and a tracing span per request.",
+  },
+];
+
+const adminEndpoints = [
+  ["GET", "/healthz", "liveness"],
+  ["GET", "/metrics", "prometheus"],
+  ["GET", "/admin/pools/api", "pool state"],
+  ["POST", "/admin/pools/api/members", "add backend"],
+  ["POST", "/admin/pools/api/members/10.0.0.5:8080/drain", "drain"],
+  ["DELETE", "/admin/pools/api/members/10.0.0.5:8080", "drain + remove"],
+  ["POST", "/admin/config/reload", "hot reload"],
+  ["GET", "/admin/config/snapshot", "live config as TOML"],
+];
+---
+
+<Layout>
+  <section
+    class="grid min-h-[calc(100vh-84px)] items-center gap-12 py-14 lg:grid-cols-[0.9fr_1.1fr]"
+  >
+    <div>
+      <div
+        class="mb-6 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-sm text-slate-300 backdrop-blur-xl"
+      >
+        <span class="h-1.5 w-1.5 rounded-full bg-cyan-300"></span>
+        Open-source reverse proxy in Rust
+      </div>
+
+      <h1
+        class="max-w-3xl text-5xl font-semibold leading-[1.02] tracking-[-0.055em] md:text-7xl"
+      >
+        A reverse proxy you can read in an afternoon.
+      </h1>
+
+      <p class="mt-6 max-w-2xl text-lg leading-8 text-slate-300">
+        quik terminates TLS, routes by host and path, checks JWTs, and
+        load-balances across backends it health-checks itself. One small binary,
+        one TOML file - no control plane, no cluster to babysit.
+      </p>
+
+      <div class="mt-8 flex flex-col gap-3 sm:flex-row">
+        <a
+          href={GITHUB_DOCS_URL}
+          target="_blank"
+          rel="noreferrer"
+          class="inline-flex items-center justify-center rounded-xl bg-white px-6 py-3 font-semibold text-slate-950 hover:bg-cyan-100"
+        >
+          Read the docs
+          <Icon name="lucide:arrow-right" class="ml-2 h-4 w-4" />
+        </a>
+        <a
+          href={GITHUB_EXAMPLES_URL}
+          target="_blank"
+          rel="noreferrer"
+          class="inline-flex items-center justify-center rounded-xl border border-cyan-300/20 bg-cyan-300/10 px-6 py-3 font-semibold text-cyan-100 hover:bg-cyan-300/15"
+        >
+          View examples
+        </a>
+      </div>
+    </div>
+
+    <div id="config" class="relative scroll-mt-24">
+      <img
+        src="/quik-logo.svg"
+        alt=""
+        class="pointer-events-none absolute -right-12 -top-16 h-72 w-72 opacity-[0.07] blur-[1px]"
+      />
+      <div
+        class="absolute inset-0 rounded-[2rem] bg-gradient-to-br from-cyan-400/20 to-blue-700/20 blur-3xl"
+      >
+      </div>
+      <CodeCard
+        caption="quik.toml"
+        code={config}
+        dots
+        class="relative shadow-2xl shadow-black/40"
+      />
+    </div>
+  </section>
+
+  <section id="features" class="scroll-mt-24 py-20">
+    <div class="mb-10 max-w-2xl">
+      <p
+        class="text-sm font-medium uppercase tracking-[0.24em] text-cyan-300"
+      >
+        What's in the box
+      </p>
+      <h2
+        class="mt-3 text-3xl font-semibold tracking-[-0.04em] md:text-5xl"
+      >
+        Boring infrastructure, deliberately.
+      </h2>
+    </div>
+
+    <div
+      class="grid gap-px overflow-hidden rounded-[1.75rem] border border-white/10 bg-white/10 md:grid-cols-2"
+    >
+      {
+        featureTiles.map((f) => (
+          <div class="bg-[#070a12]/90 p-6 backdrop-blur-xl md:p-8">
+            <Icon name={f.icon} class="mb-5 h-6 w-6 text-cyan-300" />
+            <h3 class="text-xl font-semibold tracking-tight">{f.title}</h3>
+            <p class="mt-3 leading-7 text-slate-400">{f.body}</p>
+          </div>
+        ))
+      }
+    </div>
+  </section>
+
+  <section
+    id="admin"
+    class="grid scroll-mt-24 gap-8 py-20 lg:grid-cols-[0.9fr_1.1fr] lg:items-center"
+  >
+    <div>
+      <p
+        class="text-sm font-medium uppercase tracking-[0.24em] text-cyan-300"
+      >
+        Admin API
+      </p>
+      <h2
+        class="mt-3 text-3xl font-semibold tracking-[-0.04em] md:text-5xl"
+      >
+        Change backends while traffic is flowing.
+      </h2>
+      <p class="mt-5 leading-8 text-slate-400">
+        Add members, drain the ones you're replacing, and inspect pool state
+        over a separate admin listener that also serves health and Prometheus
+        metrics. Lock it down with mTLS or a bearer token; every change lands in
+        an audit log.
+      </p>
+      <p class="mt-4 flex items-start gap-2 leading-8 text-slate-400">
+        <Icon
+          name="lucide:refresh-cw"
+          class="mt-1.5 h-4 w-4 shrink-0 text-cyan-300"
+        />
+        <span>
+          Hot-reload routes and auth with <code
+            class="rounded bg-white/10 px-1.5 py-0.5 text-[0.85em] text-slate-200"
+            >POST /admin/config/reload</code
+          > or a <code
+            class="rounded bg-white/10 px-1.5 py-0.5 text-[0.85em] text-slate-200"
+            >SIGHUP</code
+          >. It's all-or-nothing: if the new config doesn't validate, the
+          running one keeps serving.
+        </span>
+      </p>
+    </div>
+
+    <div
+      class="rounded-[1.75rem] border border-white/10 bg-white/[0.055] p-5 backdrop-blur-2xl md:p-6"
+    >
+      {
+        adminEndpoints.map(([method, path, label]) => (
+          <div class="mb-3 grid grid-cols-[72px_1fr_auto] items-center gap-3 rounded-2xl border border-white/10 bg-black/20 p-3 font-mono text-xs last:mb-0 md:text-sm">
+            <span class="rounded-lg bg-cyan-300/10 px-2 py-1 text-center font-semibold text-cyan-200">
+              {method}
+            </span>
+            <span class="overflow-hidden text-ellipsis whitespace-nowrap text-slate-200">
+              {path}
+            </span>
+            <span class="hidden text-slate-500 sm:block">{label}</span>
+          </div>
+        ))
+      }
+    </div>
+  </section>
+
+  <section id="registration" class="scroll-mt-24 py-20">
+    <div
+      class="grid gap-8 rounded-[1.75rem] border border-white/10 bg-white/[0.03] p-8 backdrop-blur-2xl md:grid-cols-[1.1fr_0.9fr] md:items-center md:p-10"
+    >
+      <div>
+        <Icon name="lucide:network" class="mb-5 h-7 w-7 text-cyan-300" />
+        <h2
+          class="text-3xl font-semibold tracking-[-0.04em] md:text-4xl"
+        >
+          Backends that register themselves.
+        </h2>
+        <p class="mt-4 leading-8 text-slate-400">
+          Build with the optional <code
+            class="rounded bg-white/10 px-1.5 py-0.5 text-[0.85em] text-slate-200"
+            >nats</code
+          > feature and quik runs an in-process watcher that reconciles a NATS
+          JetStream KV bucket into the live pool. Services write their own key
+          on a TTL lease and quik converges on it. No separate sidecar or bridge
+          to run, and the default build links no NATS code at all.
+        </p>
+        <div class="mt-6 flex flex-wrap gap-x-6 gap-y-3">
+          <a
+            href="/service-registration"
+            class="inline-flex items-center font-semibold text-cyan-200 hover:text-cyan-100"
+          >
+            How it works
+            <Icon name="lucide:arrow-right" class="ml-2 h-4 w-4" />
+          </a>
+          <a
+            href="/quik-register"
+            class="inline-flex items-center font-semibold text-cyan-200 hover:text-cyan-100"
+          >
+            The quik-register sidecar
+            <Icon name="lucide:arrow-right" class="ml-2 h-4 w-4" />
+          </a>
+          <a
+            href="/nats-deployment"
+            class="inline-flex items-center font-semibold text-cyan-200 hover:text-cyan-100"
+          >
+            Deploy a stack
+            <Icon name="lucide:arrow-right" class="ml-2 h-4 w-4" />
+          </a>
+        </div>
+      </div>
+
+      <CodeCard caption="register a backend" icon="lucide:network" code={`# enable the watcher
+cargo build --release --features nats
+
+# a backend self-registers, then
+# refreshes its TTL lease
+nats kv put quik_registrations \\
+  reg.shop.checkout.checkout-1 \\
+  '{"address":"checkout-1.svc:8080"}'`} />
+    </div>
+  </section>
+
+  <section id="docs" class="scroll-mt-24 py-20">
+    <div
+      class="relative overflow-hidden rounded-[2rem] border border-cyan-300/20 bg-gradient-to-br from-cyan-300/10 via-white/[0.04] to-blue-700/10 p-8 backdrop-blur-2xl md:p-12"
+    >
+      <img
+        src="/quik-logo.svg"
+        alt=""
+        class="pointer-events-none absolute -right-16 -top-20 h-72 w-72 opacity-[0.05]"
+      />
+      <div class="relative grid gap-8 lg:grid-cols-[1fr_1fr] lg:items-center">
+        <div>
+          <Icon name="lucide:zap" class="mb-5 h-7 w-7 text-cyan-300" />
+          <h2
+            class="text-3xl font-semibold tracking-[-0.04em] md:text-5xl"
+          >
+            Start small, grow into it.
+          </h2>
+          <p class="mt-4 max-w-2xl leading-8 text-slate-300">
+            Pull the image, mount one TOML file, and you're routing. Health
+            checks, JWT auth, route modules, live drains, and CONNECT egress are
+            all there the day you need them.
+          </p>
+          <div class="mt-6 flex flex-col gap-3 sm:flex-row">
+            <a
+              href={GITHUB_QUICKSTART_URL}
+              target="_blank"
+              rel="noreferrer"
+              class="inline-flex items-center justify-center rounded-xl bg-cyan-300 px-6 py-3 font-semibold text-slate-950 hover:bg-cyan-200"
+            >
+              Get started
+              <Icon name="lucide:arrow-right" class="ml-2 h-4 w-4" />
+            </a>
+            <a
+              href={GITHUB_URL}
+              target="_blank"
+              rel="noreferrer"
+              class="inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/[0.04] px-6 py-3 font-semibold text-white hover:bg-white/10"
+            >
+              Star on GitHub
+            </a>
+          </div>
+        </div>
+
+        <CodeCard caption="run with docker" code={dockerRun} />
+      </div>
+    </div>
+  </section>
+</Layout>

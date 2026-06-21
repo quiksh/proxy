@@ -1,0 +1,23 @@
+apiVersion: v2
+name: quik
+description: A low-latency TLS-terminating reverse proxy in Rust (HTTP/1.1 + HTTP/2, JWT auth, dynamic upstream pools).
+type: application
+
+# Chart version. Bump on chart changes, independent of the app version.
+version: 0.1.0
+
+# Default quik image tag when image.tag is unset in values. quik releases are
+# cut as git tags vX.Y.Z; pin image.tag in production rather than tracking this.
+appVersion: "latest"
+
+home: https://github.com/quiksh/proxy
+sources:
+  - https://github.com/quiksh/proxy
+keywords:
+  - reverse-proxy
+  - tls
+  - load-balancer
+  - http2
+maintainers:
+  - name: quiksh
+    url: https://github.com/quiksh

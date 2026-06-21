@@ -1,0 +1,31 @@
+/* Theme Starlight to match the custom landing page: near-black background with
+   a cyan accent. Starlight is dark-mode-first here. */
+/* Dark mode — and the default/unset state, so /docs matches the landing page's
+   near-black + cyan even before the theme toggle is touched. Uses
+   `:not([data-theme="light"])` so it never matches in light mode: Starlight
+   injects this custom CSS in a winning cascade layer, so a bare `:root` here
+   would override Starlight's light palette regardless of specificity. */
+:root:not([data-theme="light"]) {
+  /* Cyan accent (matches the cyan-300/400 used across the marketing pages). */
+  --sl-color-accent-low: #0c2a33;
+  --sl-color-accent: #22d3ee;
+  --sl-color-accent-high: #a5f3fc;
+
+  /* Dark surface ramp anchored on the landing page's #05070d. */
+  --sl-color-white: #ffffff;
+  --sl-color-gray-1: #e6edf3;
+  --sl-color-gray-2: #c2ccd6;
+  --sl-color-gray-3: #8b97a6;
+  --sl-color-gray-4: #5b6675;
+  --sl-color-gray-5: #353d49;
+  --sl-color-gray-6: #1a1f29;
+  --sl-color-black: #05070d;
+}
+
+/* Light mode — keep Starlight's tested light surface ramp (white background,
+   dark text) and only retune the cyan accent to shades that read on white. */
+:root[data-theme="light"] {
+  --sl-color-accent-low: #cffafe;
+  --sl-color-accent: #0891b2;
+  --sl-color-accent-high: #0e7490;
+}

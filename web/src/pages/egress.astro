@@ -1,0 +1,182 @@
+---
+import { Icon } from "astro-icon/components";
+import Layout from "../layouts/Layout.astro";
+import CodeCard from "../components/CodeCard.astro";
+import { GITHUB_DOCS_URL } from "../lib/site";
+
+const egressToml = `# A dedicated egress proxy: no [listener], so quik runs as a
+# forward proxy only - just the admin and egress listeners.
+[admin]
+bind = "127.0.0.1:9090"   # health + egress metrics, loopback only
+
+[egress]
+bind           = "0.0.0.0:3128"
+default_action = "deny"     # nothing leaves unless a rule says so
+sni_enforce    = true       # the TLS SNI must match the CONNECT target
+
+# Block the cloud metadata endpoint outright. Hostname targets are
+# resolved and their IPs checked against CIDRs too, so this also
+# stops a DNS-rebind to 169.254.169.254.
+[[egress.rules]]
+action = "deny"
+cidrs  = ["169.254.0.0/16", "fe80::/10", "127.0.0.0/8"]
+
+# The only destinations this app may reach:
+[[egress.rules]]
+action = "allow"
+hosts  = ["api.openai.com", "*.ingest.sentry.io"]`;
+
+const appEnv = `# Send the app's outbound HTTPS through quik. A leaked key or a
+# compromised dependency trying to phone home anywhere else gets
+# refused at the proxy, not a successful exfiltration.
+export HTTPS_PROXY=http://quik-egress:3128`;
+
+const denied = `# not on the list -> refused before a single byte leaves
+$ curl https://pastebin.example.com -x http://quik-egress:3128
+curl: (56) CONNECT tunnel failed, response 403
+
+# the allow-listed calls just work
+$ curl https://api.openai.com/v1/models -x http://quik-egress:3128
+{ "object": "list", "data": [ ... ] }`;
+
+const cards = [
+  {
+    icon: "lucide:list-checks",
+    title: "Default-deny allow-list",
+    body: "Name the hosts and CIDRs a service may reach; everything else is refused. Rules are first-match-wins and default_action is deny, so a new dependency can't quietly open a new destination.",
+  },
+  {
+    icon: "lucide:shield-check",
+    title: "SNI-pinned tunnels",
+    body: "Turn on sni_enforce and the TLS SNI inside the tunnel has to match the CONNECT target. It closes the obvious dodge: open CONNECT api.openai.com:443, then try to handshake with somewhere else.",
+  },
+  {
+    icon: "lucide:route-off",
+    title: "No metadata end-run",
+    body: "Hostname targets are DNS-resolved and the resulting IPs are checked against your CIDR denies, so a deny on 169.254.0.0/16 blocks a rebind to the cloud metadata service, not just the literal IP.",
+  },
+  {
+    icon: "lucide:scroll-text",
+    title: "Every call attributed",
+    body: "Each CONNECT logs its target, decision, and byte counts. Add Basic or JWT proxy auth and the originator - a username or token subject - lands in the log next to it.",
+  },
+];
+---
+
+<Layout
+  title="Egress filtering - quik.sh"
+  description="Run quik as a CONNECT forward proxy to pin a service's outbound to an allow-list: only the AI API, Sentry, or the registries you name, with SNI-pinned tunnels and an audit trail."
+>
+  <article class="py-12 md:py-16">
+    <a
+      href="/"
+      class="inline-flex items-center text-sm text-slate-400 hover:text-white"
+    >
+      <Icon name="lucide:arrow-left" class="mr-2 h-4 w-4" />
+      Back home
+    </a>
+
+    <header class="mt-8 max-w-3xl">
+      <p class="text-sm font-medium uppercase tracking-[0.24em] text-cyan-300">
+        Egress filtering
+      </p>
+      <h1
+        class="mt-3 text-4xl font-semibold leading-[1.05] tracking-[-0.045em] md:text-6xl"
+      >
+        Let your app call the model, not the internet.
+      </h1>
+      <p class="mt-6 text-lg leading-8 text-slate-300">
+        Point a service's outbound HTTPS at quik and it can reach only the
+        destinations you name - the AI API, Sentry, your package registry.
+        Everything else is refused at the door. quik never looks inside the
+        tunnel; TLS stays end-to-end between your app and the destination.
+      </p>
+    </header>
+
+    <div class="mt-12 grid gap-5 sm:grid-cols-2">
+      {
+        cards.map((c) => (
+          <div class="rounded-2xl border border-white/10 bg-white/[0.03] p-6 backdrop-blur-xl">
+            <Icon name={c.icon} class="mb-4 h-6 w-6 text-cyan-300" />
+            <h2 class="text-lg font-semibold tracking-tight">{c.title}</h2>
+            <p class="mt-2 leading-7 text-slate-400">{c.body}</p>
+          </div>
+        ))
+      }
+    </div>
+
+    <section class="mt-14 flex flex-col gap-12">
+      <div>
+        <h2 class="text-2xl font-semibold tracking-[-0.03em]">
+          Name what it can reach
+        </h2>
+        <p class="mt-3 leading-8 text-slate-400">
+          Run a dedicated quik with an <code
+            class="rounded bg-white/10 px-1.5 py-0.5 text-[0.85em] text-slate-200"
+            >[egress]</code
+          > block and no <code
+            class="rounded bg-white/10 px-1.5 py-0.5 text-[0.85em] text-slate-200"
+            >[listener]</code
+          >: it comes up as a forward proxy only, separate from whatever serves
+          your inbound traffic. List the destinations, deny everything else, and
+          enforce SNI so a tunnel can't be redirected once it's open.
+        </p>
+        <CodeCard caption="quik.toml" code={egressToml} dots class="mt-6" />
+      </div>
+      <div>
+        <h2 class="text-2xl font-semibold tracking-[-0.03em]">
+          Point the app at it
+        </h2>
+        <p class="mt-3 leading-8 text-slate-400">
+          Set one environment variable. Now the blast radius of a leaked
+          credential or a typo-squatted package is whatever you put on the
+          list, and nothing more.
+        </p>
+        <CodeCard caption="app environment" code={appEnv} class="mt-6" />
+        <CodeCard caption="terminal" code={denied} class="mt-4" />
+      </div>
+    </section>
+
+    <section
+      class="mt-14 rounded-[1.5rem] border border-amber-300/20 bg-amber-300/[0.05] p-6 backdrop-blur-xl md:p-8"
+    >
+      <div class="flex items-start gap-3">
+        <Icon
+          name="lucide:eye-off"
+          class="mt-1 h-5 w-5 shrink-0 text-amber-300"
+        />
+        <div>
+          <h2 class="text-lg font-semibold tracking-tight">
+            A chokepoint, not an interceptor
+          </h2>
+          <p class="mt-2 leading-7 text-slate-400">
+            quik filters by destination, not by payload. It tunnels opaque TLS,
+            so it never decrypts traffic, rewrites bodies, or reads request
+            paths, and it handles HTTPS over CONNECT only - not plaintext
+            forwarding. If you need a full L7 egress firewall that inspects the
+            request, this isn't it. What it is: a small, auditable allow-list
+            that a compromised service can't talk its way past.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <div class="mt-12 flex flex-wrap gap-4">
+      <a
+        href="/docs/forward-proxy"
+        class="inline-flex items-center justify-center rounded-xl bg-cyan-300 px-5 py-3 font-semibold text-slate-950 hover:bg-cyan-200"
+      >
+        Forward-proxy reference
+        <Icon name="lucide:arrow-right" class="ml-2 h-4 w-4" />
+      </a>
+      <a
+        href={GITHUB_DOCS_URL}
+        target="_blank"
+        rel="noreferrer"
+        class="inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/[0.04] px-5 py-3 font-semibold text-white hover:bg-white/10"
+      >
+        Docs on GitHub
+      </a>
+    </div>
+  </article>
+</Layout>

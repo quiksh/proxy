@@ -1,4 +1,7 @@
-# Config reference
+---
+title: Config reference
+description: Every TOML option quik accepts, what it does, and its default.
+---
 
 The full TOML schema. Most fields have sensible defaults - this page lists
 every option, what it does, and what the default is. For commentary and
@@ -54,6 +57,11 @@ The trust model, summarised:
 | `edge` | yes                     | Append the peer IP to the inbound chain    |
 | `host` | (ignored)               | Append the peer IP to the inbound chain    |
 
+The same trust decision also governs the correlation identity headers
+`X-Request-ID` and `traceparent`: honoured when they arrive from a trusted peer,
+regenerated when they arrive from an untrusted edge client. See
+[Identity headers](ha-reverse-proxy.md#identity-headers).
+
 ## Environment variable expansion
 
 Strings of the form `${VAR}` or `${VAR:-default}` are expanded from the
@@ -69,7 +77,7 @@ The inbound proxy listener.
 
 ```toml
 [listener]
-bind = "0.0.0.0:8443"
+bind = "0.0.0.0:443"
 
 [listener.tls]
 cert_path = "/etc/quik/tls/cert.pem"

@@ -1,8 +1,10 @@
 .DEFAULT_GOAL := help
 CARGO ?= cargo
 CONFIG ?= config/example.toml
+NPM ?= npm
+WEB_DIR ?= web
 
-.PHONY: help build release run test test-quiet bench fmt fmt-check lint check clippy doc clean docker docker-up docker-down audit ci
+.PHONY: help build release run test test-quiet bench fmt fmt-check lint check clippy doc clean docker docker-up docker-down audit ci web-install web-dev web-build web-preview
 
 help: ## Show this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make \033[36m<target>\033[0m\n\nTargets:\n"} \
@@ -58,3 +60,17 @@ audit: ## Run `cargo audit` (requires cargo-audit installed).
 	$(CARGO) audit
 
 ci: fmt-check lint test ## Run the checks CI runs locally.
+
+# ── Website (quik.sh) — Astro site in $(WEB_DIR), docs rendered from docs/*.md ──
+
+web-install: ## Install website dependencies.
+	cd $(WEB_DIR) && $(NPM) install
+
+web-dev: ## Run the website dev server (astro dev).
+	cd $(WEB_DIR) && $(NPM) run dev
+
+web-build: ## Build the static website (astro build).
+	cd $(WEB_DIR) && $(NPM) run build
+
+web-preview: ## Preview the built website locally.
+	cd $(WEB_DIR) && $(NPM) run preview

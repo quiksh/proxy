@@ -1,4 +1,7 @@
-# Graceful shutdown - edge-withdraw before local drain
+---
+title: Graceful shutdown
+description: Edge-withdraw before local drain, so a perimeter stops routing before quik stops accepting.
+---
 
 When quik runs behind a perimeter (a load balancer, Cloudflare, a service mesh),
 a plain drain races the perimeter's health check: quik stops accepting before the

@@ -15,6 +15,10 @@
 #   SAN_HOSTS  comma-separated cert SANs       (default: proxmox.internal,plex.internal,truenas.internal,localhost)
 #   CERT_DAYS  cert validity                   (default: 365)
 #
+# config/homelab.toml binds the unprivileged port 8443, so no sudo or
+# `setcap cap_net_bind_service=+ep` is needed. If you want the bare :443 URL,
+# publish it with a Docker port mapping or a firewall redirect (443 -> 8443).
+#
 # Usage:
 #   ./scripts/run-homelab.sh
 #   CONFIG=config/myconfig.toml ./scripts/run-homelab.sh

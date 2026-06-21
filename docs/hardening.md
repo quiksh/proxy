@@ -1,4 +1,7 @@
-# Hardening
+---
+title: Hardening
+description: Knobs to set before exposing quik directly to the public internet - and what it deliberately does not defend against.
+---
 
 Default config is appropriate for a proxy behind a trusted load balancer or
 CDN, where most adversarial traffic never reaches quik. This page covers the

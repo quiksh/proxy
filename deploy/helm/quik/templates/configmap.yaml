@@ -1,0 +1,188 @@
+{{- $c := .Values.config -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "quik.fullname" . }}
+  labels:
+    {{- include "quik.labels" . | nindent 4 }}
+data:
+  quik.toml: |
+    # Rendered by the quik Helm chart - do not edit in-cluster.
+    # Source of truth is the chart's values.yaml (config:). Edits here are
+    # overwritten on the next `helm upgrade`.
+    mode = {{ $c.mode | quote }}
+
+    [listener]
+    bind = "0.0.0.0:{{ $c.listener.port }}"
+
+    [listener.tls]
+    cert_path = "/etc/quik/tls/tls.crt"
+    key_path = "/etc/quik/tls/tls.key"
+    {{- with $c.listener.limits }}
+
+    [listener.limits]
+    {{- range $k, $v := . }}
+    {{ $k }} = {{ int64 $v }}
+    {{- end }}
+    {{- end }}
+
+    [admin]
+    bind = "0.0.0.0:{{ $c.admin.port }}"
+    {{- with $c.admin.auth.read }}
+
+    [admin.auth.read]
+    mode = {{ .mode | quote }}
+    {{- if .tokenEnv }}
+    token_env = {{ .tokenEnv | quote }}
+    {{- end }}
+    {{- end }}
+    {{- with $c.admin.auth.write }}
+
+    [admin.auth.write]
+    mode = {{ .mode | quote }}
+    {{- if .tokenEnv }}
+    token_env = {{ .tokenEnv | quote }}
+    {{- end }}
+    {{- end }}
+
+    [shutdown]
+    drain_grace_seconds = {{ $c.shutdown.drainGraceSeconds }}
+    pre_drain_grace_seconds = {{ $c.shutdown.preDrainGraceSeconds }}
+
+    [logging]
+    level = {{ $c.logging.level | quote }}
+    format = {{ $c.logging.format | quote }}
+    {{- if .Values.nats.enabled }}
+
+    [nats]
+    url = {{ required "nats.url is required when nats.enabled" .Values.nats.url | quote }}
+    bucket = {{ required "nats.bucket is required when nats.enabled" .Values.nats.bucket | quote }}
+    {{- if .Values.nats.credsSecret }}
+    creds_file = "/etc/quik/nats/quik.creds"
+    {{- end }}
+    {{- end }}
+
+    # ─── Upstreams ──────────────────────────────────────────────────────────
+    {{- range $c.upstreams }}
+
+    [[upstreams]]
+    name = {{ .name | quote }}
+    {{- if .balancer }}
+    balancer = {{ .balancer | quote }}
+    {{- end }}
+    {{- if .httpVersion }}
+    http_version = {{ .httpVersion | quote }}
+    {{- end }}
+    {{- if .members }}
+    members = [
+      {{- range .members }}
+      { address = {{ .address | quote }}{{ if .scheme }}, scheme = {{ .scheme | quote }}{{ end }} },
+      {{- end }}
+    ]
+    {{- else }}
+    members = []
+    {{- end }}
+    {{- if .tls }}
+    {{- if .tls.skipVerify }}
+
+    [upstreams.tls]
+    skip_verify = true
+    {{- end }}
+    {{- end }}
+    {{- with .activeHealth }}
+
+    [upstreams.active_health]
+    enabled = {{ .enabled | default false }}
+    {{- if .path }}
+    path = {{ .path | quote }}
+    {{- end }}
+    {{- if .method }}
+    method = {{ .method | quote }}
+    {{- end }}
+    {{- if .intervalMs }}
+    interval_ms = {{ int64 .intervalMs }}
+    {{- end }}
+    {{- if .timeoutMs }}
+    timeout_ms = {{ int64 .timeoutMs }}
+    {{- end }}
+    {{- if .healthyThreshold }}
+    healthy_threshold = {{ int64 .healthyThreshold }}
+    {{- end }}
+    {{- if .unhealthyThreshold }}
+    unhealthy_threshold = {{ int64 .unhealthyThreshold }}
+    {{- end }}
+    {{- if .expectedStatus }}
+    {{- if kindIs "string" .expectedStatus }}
+    expected_status = {{ .expectedStatus | quote }}
+    {{- else }}
+    expected_status = {{ int64 .expectedStatus }}
+    {{- end }}
+    {{- end }}
+    {{- if .initialState }}
+    initial_state = {{ .initialState | quote }}
+    {{- end }}
+    {{- end }}
+    {{- with .nats }}
+
+    [upstreams.nats]
+    subject = {{ required "upstream nats.subject is required" .subject | quote }}
+    allow_addresses = {{ include "quik.tomlStrArray" .allowAddresses }}
+    {{- if .maxMembers }}
+    max_members = {{ int64 .maxMembers }}
+    {{- end }}
+    {{- if .maxInstancesPerService }}
+    max_instances_per_service = {{ int64 .maxInstancesPerService }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+
+    # ─── Routes ─────────────────────────────────────────────────────────────
+    {{- range $c.routes }}
+
+    [[routes]]
+    {{- if .hosts }}
+    hosts = {{ include "quik.tomlStrArray" .hosts }}
+    {{- end }}
+    {{- if .methods }}
+    methods = {{ include "quik.tomlStrArray" .methods }}
+    {{- end }}
+    {{- if .pathExact }}
+    path_exact = {{ .pathExact | quote }}
+    {{- else }}
+    path_prefix = {{ .pathPrefix | default "/" | quote }}
+    {{- end }}
+    {{- if .stripPrefix }}
+    strip_prefix = {{ .stripPrefix | quote }}
+    {{- end }}
+    {{- if .timeoutMs }}
+    timeout_ms = {{ int64 .timeoutMs }}
+    {{- end }}
+    {{- if .maxBodyBytes }}
+    max_body_bytes = {{ int64 .maxBodyBytes }}
+    {{- end }}
+    {{- if .auth }}
+    auth = {{ .auth | quote }}
+    {{- end }}
+    upstream = {{ required "route.upstream is required" .upstream | quote }}
+    {{- end }}
+    {{- range $c.authBlocks }}
+
+    [[auth]]
+    name = {{ .name | quote }}
+    jwks_url = {{ .jwksUrl | quote }}
+    issuer = {{ .issuer | quote }}
+    audience = {{ .audience | quote }}
+    {{- if .algorithms }}
+    algorithms = {{ include "quik.tomlStrArray" .algorithms }}
+    {{- end }}
+    {{- if .requiredClaims }}
+    required_claims = {{ include "quik.tomlStrArray" .requiredClaims }}
+    {{- end }}
+    {{- if .injectHeaders }}
+    inject_headers = [
+      {{- range .injectHeaders }}
+      { claim = {{ .claim | quote }}, header = {{ .header | quote }}{{ if .required }}, required = true{{ end }} },
+      {{- end }}
+    ]
+    {{- end }}
+    {{- end }}

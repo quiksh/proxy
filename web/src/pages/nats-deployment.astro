@@ -1,0 +1,177 @@
+---
+import { Icon } from "astro-icon/components";
+import Layout from "../layouts/Layout.astro";
+import CodeCard from "../components/CodeCard.astro";
+import { GITHUB_NATS_EXAMPLES_URL } from "../lib/site";
+
+const quickStart = `# once: generate a self-signed TLS cert into tls/
+./scripts/gen-dev-cert.sh
+
+# bring up NATS + quik (--features nats) + two backends w/ sidecars
+docker compose -f examples/nats/homelab/docker-compose.yml up -d --build`;
+
+const operatorLoop = `# what's registered - NATS' view
+nats kv ls    quik_registrations
+nats kv watch quik_registrations 'reg.shop.checkout.>'   # live add/delete feed
+
+# what quik resolved it into
+curl -s localhost:9090/admin/pools/checkout | jq '.members[].address'
+
+# operator-drain an instance - durable override, applied by the watcher
+nats kv put quik_registrations override.shop.checkout.checkout-1 '{"action":"drain"}'
+nats kv del quik_registrations override.shop.checkout.checkout-1   # undrain
+
+# kill a backend → it stops heartbeating → TTL expires → drained (~30s)
+docker compose -f examples/nats/homelab/docker-compose.yml stop checkout-1
+
+# observe
+curl -s localhost:9090/metrics | grep -E 'quik_nats_|quik_pool_member_'`;
+
+const allowList = `[[upstreams]]
+name = "checkout"
+
+[upstreams.nats]
+# The KV subtree this pool registers from (required for a NATS-backed pool).
+subject         = "reg.shop.checkout.>"
+# Gate which addresses a self-asserted registration may claim. A registration
+# outside this list is rejected (quik_nats_registration_rejected_total).
+allow_addresses = ["192.168.0.0/16"]   # in the demos: [".svc"] (a docker alias)`;
+
+const stacks = [
+  {
+    icon: "lucide:house",
+    name: "homelab",
+    topology: "1 NATS node · 1 quik · 2 backends",
+    use: "Single host or homelab. Comes up in one command.",
+  },
+  {
+    icon: "lucide:server",
+    name: "ha",
+    topology: "3-node NATS cluster (R3 bucket) · 2 quik",
+    use: "Production-shaped: replicated bucket, multiple proxies converging independently.",
+  },
+];
+---
+
+<Layout
+  title="Deploy a NATS registration stack - quik.sh"
+  description="Run quik with NATS service registration: the homelab and HA example stacks, the operator loop, address allow-lists, and securing NATS with decentralised JWT credentials."
+>
+  <article class="py-12 md:py-16">
+    <a
+      href="/service-registration"
+      class="inline-flex items-center text-sm text-slate-400 hover:text-white"
+    >
+      <Icon name="lucide:arrow-left" class="mr-2 h-4 w-4" />
+      Service registration
+    </a>
+
+    <header class="mt-8 max-w-3xl">
+      <p class="text-sm font-medium uppercase tracking-[0.24em] text-cyan-300">
+        Deployment
+      </p>
+      <h1
+        class="mt-3 text-4xl font-semibold leading-[1.05] tracking-[-0.045em] md:text-6xl"
+      >
+        Deploy a NATS registration stack.
+      </h1>
+      <p class="mt-6 text-lg leading-8 text-slate-300">
+        Two runnable stacks build quik with <code
+          class="rounded bg-white/10 px-1.5 py-0.5 text-[0.85em] text-slate-200"
+          >--features nats</code
+        > and run a quik-register sidecar beside each backend. Start with the
+        homelab stack; the HA stack is the same shape with a replicated bucket
+        and a NATS cluster.
+      </p>
+    </header>
+
+    <div class="mt-12 grid gap-5 sm:grid-cols-2">
+      {
+        stacks.map((s) => (
+          <div class="rounded-2xl border border-white/10 bg-white/[0.03] p-6 backdrop-blur-xl">
+            <Icon name={s.icon} class="mb-4 h-6 w-6 text-cyan-300" />
+            <h2 class="font-mono text-lg font-semibold tracking-tight text-cyan-100">
+              {s.name}/
+            </h2>
+            <p class="mt-1 text-sm text-slate-300">{s.topology}</p>
+            <p class="mt-2 leading-7 text-slate-400">{s.use}</p>
+          </div>
+        ))
+      }
+    </div>
+
+    <section class="mt-14">
+      <h2 class="text-2xl font-semibold tracking-[-0.03em]">
+        1. Bring up the homelab stack
+      </h2>
+      <CodeCard caption="terminal" code={quickStart} class="mt-6" />
+    </section>
+
+    <section class="mt-12">
+      <h2 class="text-2xl font-semibold tracking-[-0.03em]">
+        2. The operator loop
+      </h2>
+      <p class="mt-3 max-w-3xl leading-8 text-slate-400">
+        Inspect what's registered, watch quik resolve it, drain an instance with
+        a durable override, and watch a dead backend fall out as its lease
+        expires.
+      </p>
+      <CodeCard caption="terminal" code={operatorLoop} class="mt-6" />
+    </section>
+
+    <section class="mt-12">
+      <h2 class="text-2xl font-semibold tracking-[-0.03em]">
+        3. Constrain what can register
+      </h2>
+      <p class="mt-3 max-w-3xl leading-8 text-slate-400">
+        Registration is self-asserted, so gate the addresses a pool will accept
+        with <code
+          class="rounded bg-white/10 px-1.5 py-0.5 text-[0.85em] text-slate-200"
+          >allow_addresses</code
+        >. Keep it as tight as the deployment allows - typically your LAN CIDR.
+      </p>
+      <CodeCard caption="quik.toml" code={allowList} class="mt-6" />
+    </section>
+
+    <section
+      class="mt-14 rounded-[1.5rem] border border-amber-300/20 bg-amber-300/[0.05] p-6 backdrop-blur-xl md:p-8"
+    >
+      <div class="flex items-start gap-3">
+        <Icon
+          name="lucide:shield-alert"
+          class="mt-1 h-5 w-5 shrink-0 text-amber-300"
+        />
+        <div>
+          <h2 class="text-lg font-semibold tracking-tight">
+            Secure NATS before you leave the LAN
+          </h2>
+          <p class="mt-2 leading-7 text-slate-400">
+            The bundled stacks run no-auth NATS so they come up in one command -
+            fine on a laptop or trusted LAN, never beyond it. For anything real,
+            use decentralised JWT credentials: services get a key scoped to
+            publish <code
+              class="rounded bg-white/10 px-1.5 py-0.5 text-[0.85em] text-slate-200"
+              >reg.&lt;namespace&gt;.*</code
+            > only, operators a separate key for the override namespace.
+          </p>
+          <CodeCard
+            caption="terminal"
+            code={`# nsc: operator + account + scoped .creds files
+./examples/nats/nats/bootstrap-creds.sh`}
+            class="mt-4 border-amber-300/10"
+          />
+        </div>
+      </div>
+    </section>
+
+    <p class="mt-12 max-w-3xl leading-8 text-slate-400">
+      Both stacks, the credential bootstrap, and the full key namespace and
+      permissions model live in <a
+        href={GITHUB_NATS_EXAMPLES_URL}
+        target="_blank"
+        rel="noreferrer"
+        class="text-cyan-200 underline-offset-4 hover:underline">examples/nats</a
+      > and the service-registration reference in the repo docs.
+    </p>
+  </article>
+</Layout>

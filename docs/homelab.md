@@ -1,4 +1,7 @@
-# Homelab reverse proxy
+---
+title: Homelab reverse proxy
+description: Put quik in front of a handful of self-hosted services and terminate TLS once.
+---
 
 A homelab usually has a handful of services running on different boxes -
 Proxmox at one IP, Plex at another, TrueNAS somewhere else - each on its own
@@ -17,6 +20,10 @@ The whole setup is one config file and a shell script.
 One cert, valid for all three hostnames. WebSocket consoles (Proxmox noVNC,
 xterm.js) Just Work. Backend self-signed certs are accepted with
 `skip_verify`.
+
+quik binds the unprivileged `:8443`, so it runs directly on the host without
+`sudo` or `setcap`. Want the bare `https://<service>.internal` on port 443?
+Publish it with a Docker port mapping or a firewall redirect (443 → 8443).
 
 ## Step 1 - DNS
 

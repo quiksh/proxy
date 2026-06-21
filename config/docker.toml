@@ -5,6 +5,7 @@
 mode = "edge"
 
 [listener]
+# Unprivileged port; docker-compose publishes it on the host as 443:8443.
 bind = "0.0.0.0:8443"
 
 [listener.tls]

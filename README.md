@@ -110,8 +110,8 @@ the tyres without installing Rust.
 ./scripts/gen-dev-cert.sh             # once
 docker compose up --build -d
 
-curl -k https://localhost:8443/echo/hello
-curl    http://localhost:9090/metrics
+curl -k https://localhost/echo/hello
+curl    http://127.0.0.1:9090/metrics
 docker compose logs -f quik
 ```
 
@@ -188,7 +188,7 @@ To cut a release:
    size of the jump; the workflow derives the actual number from the latest tag.
    You never type a version string.
 3. Run. The workflow tags the commit and pushes these tags to both
-   `ghcr.io/<owner>/proxy` and `ghcr.io/<owner>/quik-register`:
+   `ghcr.io/quiksh/proxy` and `ghcr.io/quiksh/quik-register`:
 
    ```
    :1.2.3   :1.2   :1   :latest
@@ -197,8 +197,8 @@ To cut a release:
 Pull the published images:
 
 ```bash
-docker pull ghcr.io/<owner>/proxy:latest
-docker pull ghcr.io/<owner>/quik-register:latest
+docker pull ghcr.io/quiksh/proxy:latest
+docker pull ghcr.io/quiksh/quik-register:latest
 ```
 
 ## Licence
