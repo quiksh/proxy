@@ -8,3 +8,7 @@ docker-compose*.yml
 .dockerignore
 Dockerfile
 **/*.md
+# Not part of the Rust build - the website (web/) has its own image at
+# web/Dockerfile, and deploy/ is packaging-only. Keep them out of this context.
+web/
+deploy/

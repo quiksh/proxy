@@ -1,0 +1,11 @@
+# Ignore rules for the website image (web/Dockerfile). BuildKit uses this in
+# preference to the repo-root .dockerignore, whose `**/*.md` rule would strip
+# the docs/*.md the site renders. The context is the repo root, so exclude the
+# heavy/irrelevant trees but keep web/ + docs/.
+.git/
+target/
+**/node_modules
+web/dist
+web/.astro
+**/.DS_Store
+tls/
