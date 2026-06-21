@@ -1,28 +1,14 @@
 name: Website
 
-# Build the quik.sh static site (web/) into a container that serves it with
-# static-web-server, and publish it to GHCR as ghcr.io/<owner>/website.
-#
-# On pull requests the image is built but NOT pushed (a fast "does it still
-# build" check). On push to main - or a manual dispatch - it's built and
-# published. The site renders docs/*.md, so doc edits trigger a rebuild too.
+# Manually triggered from the Actions tab (run it on main). Builds the quik.sh
+# static site (web/) into a container that serves it with static-web-server and
+# publishes it to GHCR as ghcr.io/quiksh/website.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "web/**"
-      - "docs/**"
-      - ".github/workflows/website.yml"
-  pull_request:
-    paths:
-      - "web/**"
-      - "docs/**"
-      - ".github/workflows/website.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
-  packages: write # push to ghcr.io (push/dispatch only)
+  packages: write # push to ghcr.io
 
 env:
   WEBSITE_IMAGE: ghcr.io/${{ github.repository_owner }}/website
@@ -36,9 +22,7 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      # No registry creds on pull_request - the build there is push=false.
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -50,18 +34,18 @@ jobs:
         with:
           images: ${{ env.WEBSITE_IMAGE }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest
             type=sha,format=long
 
       # Multi-arch is cheap here: the npm build runs once on the native arch
       # (build stage is pinned to $BUILDPLATFORM) and only the tiny SWS layer is
-      # per-target. Pushed only off PRs.
+      # per-target.
       - uses: docker/build-push-action@v6
         with:
           context: .
           file: web/Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=website
