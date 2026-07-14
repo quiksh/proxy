@@ -347,6 +347,7 @@ Ties broken by config order.
 | `timeout_ms`     | u64     | Upper bound on upstream response time. 504 on expiry.                 |
 | `max_body_bytes` | u64     | Cap inbound body via Content-Length pre-check. 413 if exceeded.       |
 | `auth`           | string  | Name of an `[[auth]]` block.                                          |
+| `preserve_host`  | bool    | Forward the client's `Host` to the upstream unchanged instead of rewriting it to the member's address. Like nginx `proxy_set_header Host $http_host` / Apache `ProxyPreserveHost On`. Needed by backends that check Host/Origin (e.g. Grafana). Default `false`. Applies to HTTP/1.1 upstreams; HTTP/2 derives `:authority` from the member address. |
 
 ### Required
 

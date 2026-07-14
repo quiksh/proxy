@@ -118,6 +118,9 @@ pub struct RouteModules {
     /// Maximum inbound request body size in bytes. Enforced via the
     /// `Content-Length` header. 413 if exceeded.
     pub max_body_bytes: Option<u64>,
+    /// Forward the client's inbound `Host` / `:authority` to the upstream
+    /// unchanged instead of rewriting it to the upstream member's address.
+    pub preserve_host: bool,
 }
 
 #[derive(Debug)]
@@ -238,6 +241,7 @@ fn build_table(routes: &[RouteConfig]) -> Result<RoutingTable> {
             strip_prefix: r.strip_prefix.clone(),
             timeout_ms: r.timeout_ms,
             max_body_bytes: r.max_body_bytes,
+            preserve_host: r.preserve_host,
         };
 
         let label: Arc<str> = labelize(&methods, &hosts, &path).into();
@@ -333,6 +337,7 @@ mod tests {
             timeout_ms: None,
             max_body_bytes: None,
             auth: None,
+            preserve_host: false,
             upstream: r.up.to_owned(),
         }
     }

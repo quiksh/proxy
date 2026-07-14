@@ -820,6 +820,13 @@ pub struct RouteConfig {
     /// Missing/invalid token → 401. Missing required claim → 403.
     #[serde(default)]
     pub auth: Option<String>,
+    /// Forward the client's inbound `Host` (HTTP/1.1) / `:authority` (HTTP/2)
+    /// to the upstream unchanged, instead of rewriting it to the upstream
+    /// member's address. Equivalent to nginx `proxy_set_header Host $http_host`
+    /// or Apache `ProxyPreserveHost On`. Needed by backends that validate the
+    /// Host/Origin (e.g. Grafana's CSRF check). Off by default.
+    #[serde(default)]
+    pub preserve_host: bool,
 
     pub upstream: String,
 }

@@ -507,6 +507,19 @@ async fn forward_inner(
     };
     strip_hop_by_hop(&mut parts.headers);
     parts.headers.remove(HOST);
+    // By default the upstream sees its own address as `Host` (hyper derives it
+    // from the request URI authority, which we set to the target above). With
+    // `preserve_host`, forward the client's inbound Host verbatim instead -
+    // equivalent to nginx `proxy_set_header Host $http_host` / Apache
+    // `ProxyPreserveHost On`. Backends that validate Host/Origin (e.g. Grafana)
+    // need this. The TCP connection still targets the upstream member; only the
+    // forwarded Host header changes.
+    if modules.preserve_host
+        && let Some(h) = inbound_host_owned.as_deref()
+        && let Ok(v) = http::HeaderValue::from_str(h)
+    {
+        parts.headers.insert(HOST, v);
+    }
 
     // ── identity / forwarding headers ────────────────────────────────────────
     // request_id was already added near the top of this function so the span

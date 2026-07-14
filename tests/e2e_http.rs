@@ -269,6 +269,82 @@ async fn wildcard_subdomain_host_routes_correctly() {
 }
 
 #[tokio::test]
+async fn default_rewrites_host_to_upstream_member() {
+    // Without preserve_host the upstream sees its own address as Host, not the
+    // client's - hyper derives it from the rewritten request URI authority.
+    let backend = Backend::spawn("a").await;
+    let proxy = spawn_proxy(ProxySpec {
+        pools: vec![common::Backends::http("p", vec![backend.addr])],
+        routes: vec![RouteConfig {
+            path_prefix: Some("/".to_string()),
+            upstream: "p".to_string(),
+            ..Default::default()
+        }],
+    })
+    .await;
+    let client = https_client();
+
+    let resp = client
+        .get(url(proxy.addr, "/x"))
+        .header("host", "grafana.example.com")
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let calls = backend.calls();
+    assert_eq!(calls.len(), 1);
+    let host = calls[0]
+        .headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .expect("upstream received a Host header");
+    assert_eq!(host, backend.addr.to_string());
+    assert_ne!(host, "grafana.example.com");
+    // The original client Host is still available via X-Forwarded-Host.
+    assert_eq!(
+        calls[0]
+            .headers
+            .get("x-forwarded-host")
+            .and_then(|v| v.to_str().ok()),
+        Some("grafana.example.com")
+    );
+}
+
+#[tokio::test]
+async fn preserve_host_forwards_client_host_to_upstream() {
+    // preserve_host = nginx `proxy_set_header Host $http_host` / Apache
+    // `ProxyPreserveHost On`: the upstream sees the client's Host verbatim.
+    let backend = Backend::spawn("a").await;
+    let proxy = spawn_proxy(ProxySpec {
+        pools: vec![common::Backends::http("p", vec![backend.addr])],
+        routes: vec![RouteConfig {
+            path_prefix: Some("/".to_string()),
+            preserve_host: true,
+            upstream: "p".to_string(),
+            ..Default::default()
+        }],
+    })
+    .await;
+    let client = https_client();
+
+    let resp = client
+        .get(url(proxy.addr, "/x"))
+        .header("host", "grafana.example.com")
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let calls = backend.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].headers.get("host").and_then(|v| v.to_str().ok()),
+        Some("grafana.example.com")
+    );
+}
+
+#[tokio::test]
 async fn path_exact_beats_prefix() {
     let backend = Backend::spawn("a").await;
     let proxy = spawn_proxy(ProxySpec {
