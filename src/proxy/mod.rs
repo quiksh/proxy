@@ -807,9 +807,22 @@ fn apply_listener_limits(
             )))
             .keep_alive_timeout(Duration::from_millis(limits.http2_keep_alive_timeout_ms));
     }
-    builder
-        .http2()
-        .max_concurrent_streams(limits.http2_max_concurrent_streams);
+    // 0 defers to hyper's default (~200); applying `Some(0)` would advertise
+    // SETTINGS_MAX_CONCURRENT_STREAMS=0 and refuse every inbound h2 stream.
+    if limits.http2_max_concurrent_streams > 0 {
+        builder
+            .http2()
+            .max_concurrent_streams(limits.http2_max_concurrent_streams);
+    }
+    // Rapid Reset (CVE-2023-44487) mitigation: bound the number of
+    // client-reset streams awaiting acceptance before we GOAWAY the
+    // connection. 0 defers to hyper's built-in default rather than pinning
+    // a cap of zero (which would reject the first legitimate cancellation).
+    if limits.http2_max_pending_accept_reset_streams > 0 {
+        builder
+            .http2()
+            .max_pending_accept_reset_streams(limits.http2_max_pending_accept_reset_streams);
+    }
 }
 
 fn is_websocket_upgrade_request(req: &Request<Incoming>) -> bool {
