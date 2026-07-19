@@ -48,12 +48,12 @@ The rest of this page is the bounded set of L7 defences quik does offer.
 
 ```toml
 [listener.limits]
-header_read_timeout_ms             = 30_000      # slowloris
-http2_keep_alive_interval_ms       = 0           # disabled by default
-http2_keep_alive_timeout_ms        = 20_000
-http2_max_concurrent_streams       = 256
-http2_max_concurrent_reset_streams = 64          # CVE-2023-44487
-websocket_idle_timeout_ms          = 300_000     # 5 min
+header_read_timeout_ms                 = 30_000  # slowloris
+http2_keep_alive_interval_ms           = 0       # disabled by default
+http2_keep_alive_timeout_ms            = 20_000
+http2_max_concurrent_streams           = 256
+http2_max_pending_accept_reset_streams = 20      # CVE-2023-44487
+websocket_idle_timeout_ms              = 300_000 # 5 min
 ```
 
 ### `header_read_timeout_ms`
@@ -102,18 +102,30 @@ Lower it (e.g. `64`) when traffic is direct from untrusted clients;
 raise it (e.g. `1024`) for trusted backend-to-backend traffic where
 many concurrent requests over one connection is the actual workload.
 
-### `http2_max_concurrent_reset_streams`
+### `http2_max_pending_accept_reset_streams`
 
-Limits the number of locally-reset streams the server tracks in memory
-(RFC 9113 §5.1.2). Default `64`. The 2023 "Rapid Reset" attack
-(CVE-2023-44487) opens a stream and immediately RSTs it - at high rates,
-this can starve the server even though no stream is "active". Hyper
-caps this automatically; this knob makes the cap configurable for
-defenders who want to tighten it further.
+The 2023 "Rapid Reset" attack (CVE-2023-44487) opens an HTTP/2 stream and
+immediately sends `RST_STREAM` to cancel it. Each cycle forces the server
+to allocate stream state and dispatch the request, yet the stream is never
+"active", so it never counts against `http2_max_concurrent_streams`. At
+high rates this is an amplification DoS.
 
-> **Note.** This option is currently parsed but not yet plumbed through
-> to hyper's builder - the underlying API stabilised after the rest of
-> these landed. Tracked as a follow-up.
+This knob bounds how many client-reset streams may sit awaiting server
+acceptance at once; cross the limit and quik closes the connection with
+`GOAWAY`. Default `20`, matching hyper's built-in cap, so the protection
+is on out of the box.
+
+| Deployment              | Recommended                                   |
+|-------------------------|-----------------------------------------------|
+| Behind a CDN            | `20` (default) - CDN absorbs the volumetric abuse |
+| Direct to public        | `10`-`20`                                      |
+| gRPC / cancellation-heavy | `50`-`100` - legitimate clients RST often   |
+
+Set `0` to defer to hyper's built-in default rather than pinning an
+explicit value. Note this differs from the timeout knobs above, where `0`
+disables the defence: a pending-reset cap of zero would reject the first
+legitimate stream cancellation, so `0` means "use hyper's default", not
+"unlimited".
 
 ### `websocket_idle_timeout_ms`
 
@@ -185,7 +197,6 @@ hardening pass.
 | Inbound body idle timeout (slow-POST mitigation)                 | Needs a polled-body wrapper                       |
 | Connection limit per inbound IP                                  | Would also gate the slowloris path                |
 | Rate limiting (per-IP, per-route, per-sub)                       | See the rate-limit ADR for design                 |
-| `http2_max_concurrent_reset_streams` plumbing                    | Config parsed, not yet applied to hyper builder   |
 
 Until those land, the recommended posture for direct-to-public deployments
 is a CDN (Cloudflare / Fastly / CloudFront) in front of quik. The CDN
@@ -198,12 +209,12 @@ A config block to start from when there's no CDN ahead of quik:
 
 ```toml
 [listener.limits]
-header_read_timeout_ms             = 5_000
-http2_keep_alive_interval_ms       = 30_000
-http2_keep_alive_timeout_ms        = 10_000
-http2_max_concurrent_streams       = 64
-http2_max_concurrent_reset_streams = 16
-websocket_idle_timeout_ms          = 60_000
+header_read_timeout_ms                 = 5_000
+http2_keep_alive_interval_ms           = 30_000
+http2_keep_alive_timeout_ms            = 10_000
+http2_max_concurrent_streams           = 64
+http2_max_pending_accept_reset_streams = 10
+websocket_idle_timeout_ms              = 60_000
 
 [shutdown]
 drain_grace_seconds = 30

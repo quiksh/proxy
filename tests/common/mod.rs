@@ -982,7 +982,7 @@ pub fn hyper_h2_client() -> Client<hyper_rustls::HttpsConnector<HttpConnector>, 
 }
 
 #[derive(Debug)]
-struct TestNoVerifier;
+pub struct TestNoVerifier;
 
 impl ServerCertVerifier for TestNoVerifier {
     fn verify_server_cert(

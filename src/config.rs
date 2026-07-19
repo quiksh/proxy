@@ -290,12 +290,20 @@ pub struct ListenerLimitsConfig {
     pub http2_keep_alive_timeout_ms: u64,
     /// Max concurrent HTTP/2 streams per inbound connection. Bounds memory
     /// and goroutine-equivalent task count one client can hold. Default: 256.
+    /// Set 0 to defer to hyper's default rather than pinning a cap of zero
+    /// (which would advertise `SETTINGS_MAX_CONCURRENT_STREAMS=0` and refuse
+    /// every stream).
     #[serde(default = "default_http2_max_concurrent_streams")]
     pub http2_max_concurrent_streams: u32,
-    /// Max number of locally-reset streams kept in memory (RFC 9113 §5.1.2).
-    /// Mitigates CVE-2023-44487 ("Rapid Reset"). Default: 64.
-    #[serde(default = "default_http2_max_concurrent_reset_streams")]
-    pub http2_max_concurrent_reset_streams: usize,
+    /// Max number of client-reset HTTP/2 streams that may be pending server
+    /// acceptance before the connection is closed with GOAWAY. This is the
+    /// mitigation for CVE-2023-44487 ("Rapid Reset"): a client opens a stream
+    /// and immediately sends RST_STREAM, forcing per-stream work that never
+    /// counts against `max_concurrent_streams`. Default: 20 (matches hyper's
+    /// built-in default). Set 0 to defer to hyper's default rather than
+    /// pinning an explicit cap.
+    #[serde(default = "default_http2_max_pending_accept_reset_streams")]
+    pub http2_max_pending_accept_reset_streams: usize,
     /// How long an established WebSocket tunnel may sit idle (no bytes in
     /// either direction) before the proxy closes it. Set 0 to disable.
     /// Default: 300_000 (5 min). Long-lived chat / control protocols
@@ -312,7 +320,8 @@ impl Default for ListenerLimitsConfig {
             http2_keep_alive_interval_ms: 0,
             http2_keep_alive_timeout_ms: default_http2_keep_alive_timeout_ms(),
             http2_max_concurrent_streams: default_http2_max_concurrent_streams(),
-            http2_max_concurrent_reset_streams: default_http2_max_concurrent_reset_streams(),
+            http2_max_pending_accept_reset_streams: default_http2_max_pending_accept_reset_streams(
+            ),
             websocket_idle_timeout_ms: default_ws_idle_timeout_ms(),
         }
     }
@@ -327,8 +336,8 @@ fn default_http2_keep_alive_timeout_ms() -> u64 {
 fn default_http2_max_concurrent_streams() -> u32 {
     256
 }
-fn default_http2_max_concurrent_reset_streams() -> usize {
-    64
+fn default_http2_max_pending_accept_reset_streams() -> usize {
+    20
 }
 fn default_ws_idle_timeout_ms() -> u64 {
     300_000
@@ -1375,6 +1384,41 @@ bind = "127.0.0.1:9090"
         );
         let cfg: Config = toml::from_str(&s).unwrap();
         assert_eq!(cfg.upstreams[0].drain.timeout_ms, 60_000);
+    }
+
+    #[test]
+    fn pending_accept_reset_streams_defaults_to_twenty() {
+        let s = format!(
+            "{MIN}\n[[upstreams]]\nname=\"a\"\nmembers=[{{address=\"127.0.0.1:1\"}}]\n\
+             [[routes]]\npath_prefix=\"/x\"\nupstream=\"a\"\n"
+        );
+        let cfg: Config = toml::from_str(&s).unwrap();
+        assert_eq!(
+            cfg.listener
+                .as_ref()
+                .unwrap()
+                .limits
+                .http2_max_pending_accept_reset_streams,
+            20
+        );
+    }
+
+    #[test]
+    fn pending_accept_reset_streams_is_configurable() {
+        let s = format!(
+            "{MIN}\n[listener.limits]\nhttp2_max_pending_accept_reset_streams = 5\n\
+             [[upstreams]]\nname=\"a\"\nmembers=[{{address=\"127.0.0.1:1\"}}]\n\
+             [[routes]]\npath_prefix=\"/x\"\nupstream=\"a\"\n"
+        );
+        let cfg: Config = toml::from_str(&s).unwrap();
+        assert_eq!(
+            cfg.listener
+                .as_ref()
+                .unwrap()
+                .limits
+                .http2_max_pending_accept_reset_streams,
+            5
+        );
     }
 
     #[test]

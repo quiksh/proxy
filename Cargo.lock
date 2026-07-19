@@ -1501,6 +1501,7 @@ dependencies = [
  "criterion",
  "futures",
  "getrandom 0.3.4",
+ "h2",
  "hdrhistogram",
  "http",
  "http-body",
