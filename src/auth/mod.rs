@@ -10,6 +10,7 @@
 //! - [`client`]: outbound HTTP clients for JWKS fetches and authorizers.
 
 mod authorizer;
+mod cache;
 mod client;
 mod jwt;
 

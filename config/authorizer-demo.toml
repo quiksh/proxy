@@ -37,6 +37,8 @@ timeout_ms      = 500
 forward_headers = ["authorization", "x-api-key", "x-mock-status", "x-mock-delay-ms"]
 inject_headers  = ["x-user-id", "x-tenant-id", "x-scopes"]
 on_error        = "deny"
+# Uncomment to cache decisions per quik instance (see docs: [authorizers.cache]).
+# cache = { ttl_seconds = 60 }
 
 [[authorizers]]
 name            = "mock-body"

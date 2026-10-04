@@ -58,6 +58,7 @@ A matching rule then decides the response:
 | `inject`           | `{}`    | Headers quik should inject (2xx only). Values can use the templates `{claims.X}`, `{header.X}`, `{bearer_suffix}`, `{method}` and `{path}`. |
 | `body`             | empty   | Body of a deny response, which quik passes to the client.      |
 | `www_authenticate` | unset   | `www-authenticate` header on a deny response.              |
+| `cache_control`    | unset   | `Cache-Control` on the response, such as `no-store` or `max-age=30`, for testing `[authorizers.cache]`. |
 | `delay_ms`         | `0`     | Waits this long before responding. Use it to test `timeout_ms`.         |
 
 ```toml

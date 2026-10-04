@@ -6,7 +6,7 @@
 #   claims = { claim = "value" | "*" }, bearer_prefix, body_contains
 # Outcome:
 #   status (default 200), inject = { header = "template" }, body,
-#   www_authenticate, delay_ms
+#   www_authenticate, cache_control, delay_ms
 # Templates in inject: {claims.X} {header.X} {bearer_suffix} {method} {path}
 
 # Admin area needs the admin key.

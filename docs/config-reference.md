@@ -509,6 +509,100 @@ rejects the overlap.
 
 WebSocket upgrades go through `auth` and the authoriser in the same way as other requests.
 
+### Caching decisions (`[authorizers.cache]`)
+
+Each quik instance can cache the authoriser's decisions in memory, so repeat
+requests skip the network call. It's off by default.
+
+```toml
+[[authorizers]]
+name = "internal"
+url  = "https://authz.internal/v1/authorize"
+forward_headers = ["authorization"]
+inject_headers  = ["x-user-id", "x-tenant-id"]
+
+[authorizers.cache]
+ttl_seconds = 300                      # 0–900 (15 minutes); 0 = off
+key         = ["header:authorization"] # optional; see below
+max_entries = 100000
+```
+
+| Field          | Type             | Default    | Notes |
+|----------------|------------------|------------|-------|
+| `ttl_seconds`  | u64              | `0`        | How long a decision stays cached, 0–900 seconds. 0 turns caching off. |
+| `key`          | array of strings | whole request | What counts as "the same request". See below. |
+| `max_entries`  | usize            | `100000`   | Upper limit per quik instance. When full, entries closest to expiry are removed first. Plan for about 0.5 KB per entry with three injected headers. |
+| `cache_denies` | bool             | `true`     | Also cache 4xx denies, which protects the authoriser from repeated bad credentials. |
+| `backend`      | `memory`         | `memory`   | Where decisions are stored. Only in-process memory is available today. |
+
+**What's cached.** 2xx allows, including their injected headers, and 4xx
+denies, including the body that's passed to the client. Authoriser errors
+(timeouts, 5xx) are never cached. The authoriser can control caching per
+response with `Cache-Control`: `no-store`, `no-cache`, `private` or
+`max-age=0` stop that response being cached, and `max-age=N` caches it for
+at most N seconds, never longer than `ttl_seconds`.
+
+**The key.** When `key` isn't set, quik keys on everything the authoriser
+receives except `request_id`: method, host, path, query, source IP, the
+`forward_headers` and the JWT claims. A cached decision is therefore only
+reused for a request that's identical from the authoriser's point of view.
+This is the safe default.
+
+To cache by identity alone, list only the fields that decide the outcome,
+for example `["header:authorization"]`, like API Gateway's identity-source
+caching. This gives far better hit rates, but the authoriser's decision must
+then be the same for every path and method that credential can reach. If
+admin routes need a different decision, either give them their own
+authoriser block or add `"path"` to the key. Valid entries: `method`, `host`,
+`path`, `query`, `source_ip`, `claims`, `header:<name>`.
+
+**Security.**
+- The spoofed-header check runs on every request, cached or not.
+- Only a SHA-256 hash of the key is stored, never the token itself.
+- A config reload clears the cache.
+- A revoked credential can keep working for up to `ttl_seconds`. Choose the
+  TTL with that in mind, or have the authoriser send a shorter `max-age` for
+  sensitive principals.
+- Caching can't be combined with `include_body`, because the decision depends
+  on the payload.
+
+**Metrics.** `quik_authorizer_cache_total{authorizer,result}`, where
+`result` is `hit`, `miss` or `evicted`.
+
+#### Caching across several quik instances
+
+Each quik instance has its own cache. With N instances behind a load balancer
+that spreads requests evenly, a user's requests reach every instance, so in
+the worst case the authoriser is called once **per user, per instance, per
+TTL**:
+
+```
+authoriser calls/s ≤ active users × N ÷ ttl_seconds   (and never more than the uncached request rate)
+```
+
+For example, 1M users who are all active within a 5-minute window, with 4
+instances and `ttl_seconds = 300`, means at most about 13k calls/s, and each
+instance holds up to 1M entries (about 520 MB). How to reduce that:
+
+- **Narrow the key to the caller's identity** (`["header:authorization"]` or
+  `["claims"]`). With the default key, every distinct path or query is a
+  separate entry, so ID-heavy URLs (`/orders/123`) rarely hit the cache.
+- **Route each caller to the same instance.** Configure the load balancer to
+  hash on `Authorization` or the session cookie. Each instance then sees about
+  1/N of the users, so its cache holds 1/N of the entries and the authoriser
+  load drops by about N times.
+- **Size `max_entries` to the number of users active in a TTL window on one
+  instance**, not the total user count. Once the cache is full, the entries
+  closest to expiry are dropped; the rest still give hits.
+- **If the credential is a JWT, verify it locally with `[[auth]]`** and leave
+  only policy decisions to the authoriser. Checking a signature needs no
+  network call at all.
+- **Cache inside the authoriser too.** A cache miss in quik then costs one
+  fast round trip rather than a full policy evaluation.
+
+A shared cache across instances (NATS KV or Redis) isn't available yet. The
+storage interface is designed so one can be added as another `backend`.
+
 ### Request bodies (`include_body`)
 
 To decide based on the payload (amounts, resource IDs, GraphQL operation

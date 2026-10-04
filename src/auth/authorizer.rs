@@ -29,13 +29,14 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use bytes::Bytes;
-use http::header::{CONTENT_TYPE, USER_AGENT, WWW_AUTHENTICATE};
+use http::header::{CACHE_CONTROL, CONTENT_TYPE, USER_AGENT, WWW_AUTHENTICATE};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, Uri};
 use http_body_util::{BodyExt, Full, Limited};
 use metrics::{Counter, Histogram};
 use serde::{Deserialize, Serialize};
 
 use super::Claims;
+use super::cache::{CacheHint, VerdictCache};
 use crate::config::{AuthorizerConfig, AuthorizerOnError};
 use crate::upstream::{ProxyClient, into_proxy_body};
 
@@ -91,6 +92,8 @@ pub struct HttpAuthorizer {
     forward_headers: Vec<HeaderName>,
     inject_headers: Vec<HeaderName>,
     client: ProxyClient,
+    /// Verdict cache, when `[authorizers.cache].ttl_seconds > 0`.
+    cache: Option<VerdictCache>,
 }
 
 /// What the authorizer sees of the inbound request.
@@ -107,7 +110,7 @@ pub struct AuthzRequest<'a> {
     pub body: Option<&'a Bytes>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum AuthzVerdict {
     /// Allowed; set these headers on the upstream-bound request.
     Allow(Vec<(HeaderName, HeaderValue)>),
@@ -163,6 +166,7 @@ impl HttpAuthorizer {
             forward_headers: parse_names(&cfg.forward_headers)?,
             inject_headers: parse_names(&cfg.inject_headers)?,
             client,
+            cache: VerdictCache::from_config(&cfg.name, &cfg.cache)?,
         })
     }
 
@@ -191,7 +195,20 @@ impl HttpAuthorizer {
     /// Ask the authorizer for a verdict. `Err` means no verdict (timeout,
     /// transport failure, unexpected status, malformed body) - the caller
     /// applies `on_error`.
+    ///
+    /// With a cache configured, a live cached verdict for the same key is
+    /// returned without calling out; a fresh allow/deny is stored per the
+    /// response's `Cache-Control`. Errors are never cached.
     pub async fn authorize(&self, req: AuthzRequest<'_>) -> Result<AuthzVerdict> {
+        let key = self
+            .cache
+            .as_ref()
+            .map(|c| c.key(&req, &self.forward_headers));
+        if let (Some(cache), Some(key)) = (&self.cache, &key)
+            && let Some(hit) = cache.get(key).await
+        {
+            return Ok((*hit).clone());
+        }
         let started = Instant::now();
         let result = tokio::time::timeout(self.timeout, self.call(req))
             .await
@@ -199,10 +216,14 @@ impl HttpAuthorizer {
         self.metrics
             .duration
             .record(started.elapsed().as_secs_f64());
-        result
+        let (verdict, hint) = result?;
+        if let (Some(cache), Some(key)) = (&self.cache, key) {
+            cache.put(key, &verdict, hint).await;
+        }
+        Ok(verdict)
     }
 
-    async fn call(&self, req: AuthzRequest<'_>) -> Result<AuthzVerdict> {
+    async fn call(&self, req: AuthzRequest<'_>) -> Result<(AuthzVerdict, CacheHint)> {
         let body = serde_json::to_vec(&self.envelope(&req)).context("encoding envelope")?;
         let out = Request::post(self.uri.clone())
             .header(CONTENT_TYPE, "application/json")
@@ -215,10 +236,15 @@ impl HttpAuthorizer {
             .await
             .context("authorizer request")?;
         let status = resp.status();
+        let hint = CacheHint::from_cache_control(
+            resp.headers()
+                .get(CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+        );
 
         if status.is_success() {
             let body = read_capped(resp.into_body()).await?;
-            return Ok(AuthzVerdict::Allow(self.allowed_headers(&body)?));
+            return Ok((AuthzVerdict::Allow(self.allowed_headers(&body)?), hint));
         }
         if status.is_client_error() {
             let (parts, body) = resp.into_parts();
@@ -234,11 +260,14 @@ impl HttpAuthorizer {
                 headers.remove(CONTENT_TYPE);
                 Bytes::new()
             });
-            return Ok(AuthzVerdict::Deny {
-                status,
-                headers,
-                body,
-            });
+            return Ok((
+                AuthzVerdict::Deny {
+                    status,
+                    headers,
+                    body,
+                },
+                hint,
+            ));
         }
         anyhow::bail!("authorizer returned {status}")
     }
@@ -298,9 +327,12 @@ impl HttpAuthorizer {
             serde_json::from_slice(body).context("authorizer allow body is not valid JSON")?;
         let mut out: Vec<(HeaderName, HeaderValue)> = Vec::with_capacity(parsed.headers.len());
         for (name, value) in parsed.headers {
+            // Clone the allowlist's own `HeaderName` (a refcount bump) rather
+            // than keeping the freshly parsed one, so cached verdicts share
+            // header-name storage instead of allocating per entry.
             let allowed = HeaderName::try_from(name.as_str())
                 .ok()
-                .filter(|n| self.inject_headers.contains(n));
+                .and_then(|n| self.inject_headers.iter().find(|h| **h == n).cloned());
             let Some(header) = allowed else {
                 tracing::warn!(
                     authorizer = %self.name,
@@ -357,6 +389,7 @@ mod tests {
             max_body_bytes: 1024,
             body_timeout_ms: 1000,
             tls: Default::default(),
+            cache: Default::default(),
         };
         HttpAuthorizer::build(&cfg, super::super::client::build_jwks_client_skip_verify()).unwrap()
     }
