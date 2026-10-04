@@ -4,6 +4,8 @@
 //! reference are otherwise flagged as dead code. Suppress at the module level.
 #![allow(dead_code)]
 
+pub mod pki;
+
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
@@ -541,9 +543,25 @@ pub struct Backends {
     pub drain: quik::config::DrainConfig,
     /// NATS registration binding (default: none). Set via [`Backends::with_nats`].
     pub nats: Option<quik::config::UpstreamNatsConfig>,
+    /// Full TLS settings (CA / client cert / server name). When set it
+    /// replaces the `skip_verify` shorthand. Set via [`Backends::https_tls`].
+    pub tls: Option<UpstreamTlsConfig>,
 }
 
 impl Backends {
+    /// HTTPS pool with explicit TLS settings (private CA, mTLS, server name).
+    pub fn https_tls(
+        name: impl Into<String>,
+        addrs: Vec<SocketAddr>,
+        tls: UpstreamTlsConfig,
+    ) -> Self {
+        Self {
+            members: addrs.into_iter().map(|a| (a, "https")).collect(),
+            tls: Some(tls),
+            ..Self::http(name, vec![])
+        }
+    }
+
     pub fn http(name: impl Into<String>, addrs: Vec<SocketAddr>) -> Self {
         Self {
             name: name.into(),
@@ -555,6 +573,7 @@ impl Backends {
             active_health: Default::default(),
             drain: Default::default(),
             nats: None,
+            tls: None,
         }
     }
 
@@ -569,6 +588,7 @@ impl Backends {
             active_health: Default::default(),
             drain: Default::default(),
             nats: None,
+            tls: None,
         }
     }
 
@@ -756,9 +776,10 @@ async fn spawn_proxy_full(
                 })
                 .collect(),
             balancer: p.balancer,
-            tls: UpstreamTlsConfig {
+            tls: p.tls.unwrap_or(UpstreamTlsConfig {
                 skip_verify: p.skip_verify,
-            },
+                ..Default::default()
+            }),
             health: p.health,
             http_version: p.http_version,
             active_health: p.active_health,

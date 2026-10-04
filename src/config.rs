@@ -232,8 +232,23 @@ pub struct ClaimHeaderMapping {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuthorizerConfig {
     pub name: String,
-    /// `http://` or `https://` endpoint the envelope is POSTed to.
-    pub url: String,
+    /// `http://` or `https://` endpoint the envelope is POSTed to. Set this
+    /// *or* `upstream`, not both.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Name of an `[[upstreams]]` pool of authorizer instances. quik balances
+    /// across its members with the pool's balancer, health checks, draining,
+    /// and admin-API / NATS membership - no separate load balancer needed.
+    #[serde(default)]
+    pub upstream: Option<String>,
+    /// Request path when using `upstream` (default `/`).
+    #[serde(default)]
+    pub path: Option<String>,
+    /// With `upstream`: extra attempts on a *different* member after a
+    /// connection error or 5xx, within the same `timeout_ms` budget. 0-3,
+    /// default 1. 4xx (a deny) is never retried.
+    #[serde(default = "default_authorizer_retries")]
+    pub retries: u32,
     /// Upper bound on the whole authorizer call (connect + response body).
     /// Expiry is an authorizer error, handled per `on_error`.
     #[serde(default = "default_authorizer_timeout_ms")]
@@ -338,6 +353,13 @@ pub const AUTHORIZER_CACHE_MAX_TTL_SECONDS: u64 = 15 * 60;
 fn default_authorizer_timeout_ms() -> u64 {
     1000
 }
+
+fn default_authorizer_retries() -> u32 {
+    1
+}
+
+/// Upper bound on `[[authorizers]].retries`.
+pub const AUTHORIZER_MAX_RETRIES: u32 = 3;
 
 fn default_authorizer_max_body_bytes() -> u64 {
     64 * 1024
@@ -890,6 +912,23 @@ pub struct UpstreamTlsConfig {
     /// self-signed certs in test environments. Default: false.
     #[serde(default)]
     pub skip_verify: bool,
+    /// PEM bundle of CA certificates to verify this pool's members against.
+    /// When set it *replaces* the bundled public roots - members must present
+    /// a certificate from these CAs (private PKI pinning).
+    #[serde(default)]
+    pub ca_path: Option<String>,
+    /// PEM client certificate chain quik presents to members (mTLS).
+    /// Requires `key_path`.
+    #[serde(default)]
+    pub cert_path: Option<String>,
+    /// PEM private key for `cert_path`.
+    #[serde(default)]
+    pub key_path: Option<String>,
+    /// Name to verify members' certificates against (and send as SNI) instead
+    /// of the member address - for members addressed by IP whose
+    /// certificates name a DNS host.
+    #[serde(default)]
+    pub server_name: Option<String>,
 }
 
 /// Per-pool passive health (outlier detection) tuning. The proxy ejects a
@@ -1185,6 +1224,26 @@ const AUTHORIZER_FORBIDDEN_INJECT: &[&str] = &[
     "traceparent",
 ];
 
+fn validate_upstream_tls(pool: &str, t: &UpstreamTlsConfig) -> Result<()> {
+    if t.cert_path.is_some() != t.key_path.is_some() {
+        anyhow::bail!(
+            "upstream pool '{pool}': tls.cert_path and tls.key_path must be set together"
+        );
+    }
+    if t.skip_verify && (t.ca_path.is_some() || t.server_name.is_some()) {
+        anyhow::bail!(
+            "upstream pool '{pool}': tls.skip_verify disables verification, so tls.ca_path / \
+             tls.server_name would be ignored - remove one"
+        );
+    }
+    if let Some(n) = &t.server_name {
+        rustls::pki_types::ServerName::try_from(n.as_str()).map_err(|_| {
+            anyhow::anyhow!("upstream pool '{pool}': invalid tls.server_name '{n}'")
+        })?;
+    }
+    Ok(())
+}
+
 fn validate_authorizer_cache(a: &AuthorizerConfig) -> Result<()> {
     let c = &a.cache;
     if c.ttl_seconds > AUTHORIZER_CACHE_MAX_TTL_SECONDS {
@@ -1225,23 +1284,55 @@ fn validate_authorizer_cache(a: &AuthorizerConfig) -> Result<()> {
     Ok(())
 }
 
-fn validate_authorizers(authorizers: &[AuthorizerConfig]) -> Result<()> {
+fn validate_authorizers(cfg: &Config) -> Result<()> {
     let mut names = HashSet::new();
-    for a in authorizers {
+    for a in &cfg.authorizers {
         if !names.insert(a.name.as_str()) {
             anyhow::bail!("duplicate authorizer name '{}'", a.name);
         }
         let ctx = || format!("authorizer '{}'", a.name);
-        let uri: http::Uri = a
-            .url
-            .parse()
-            .with_context(|| format!("{}: invalid url '{}'", ctx(), a.url))?;
-        match uri.scheme_str() {
-            Some("http") | Some("https") => {}
-            _ => anyhow::bail!("{}: url must be http:// or https://", ctx()),
+        match (&a.url, &a.upstream) {
+            (Some(url), None) => {
+                let uri: http::Uri = url
+                    .parse()
+                    .with_context(|| format!("{}: invalid url '{url}'", ctx()))?;
+                match uri.scheme_str() {
+                    Some("http") | Some("https") => {}
+                    _ => anyhow::bail!("{}: url must be http:// or https://", ctx()),
+                }
+                if uri.host().is_none() {
+                    anyhow::bail!("{}: url has no host", ctx());
+                }
+                if a.path.is_some() {
+                    anyhow::bail!("{}: path is only used with upstream (put it in url)", ctx());
+                }
+            }
+            (None, Some(pool)) => {
+                if !cfg.upstreams.iter().any(|u| &u.name == pool) {
+                    anyhow::bail!("{}: unknown upstream pool '{pool}'", ctx());
+                }
+                if let Some(p) = &a.path {
+                    let paq: http::uri::PathAndQuery = p
+                        .parse()
+                        .with_context(|| format!("{}: invalid path '{p}'", ctx()))?;
+                    if !paq.path().starts_with('/') {
+                        anyhow::bail!("{}: path must start with '/'", ctx());
+                    }
+                }
+                // Pool members use the pool's own client (and its TLS).
+                let t = &a.tls;
+                if t.ca_path.is_some() || t.cert_path.is_some() || t.key_path.is_some() {
+                    anyhow::bail!(
+                        "{}: tls is set per [[upstreams]] pool when using upstream",
+                        ctx()
+                    );
+                }
+            }
+            (Some(_), Some(_)) => anyhow::bail!("{}: set url or upstream, not both", ctx()),
+            (None, None) => anyhow::bail!("{}: one of url or upstream is required", ctx()),
         }
-        if uri.host().is_none() {
-            anyhow::bail!("{}: url has no host", ctx());
+        if a.retries > AUTHORIZER_MAX_RETRIES {
+            anyhow::bail!("{}: retries must be 0-{AUTHORIZER_MAX_RETRIES}", ctx());
         }
         if a.timeout_ms == 0 {
             anyhow::bail!("{}: timeout_ms must be > 0", ctx());
@@ -1302,11 +1393,14 @@ fn validate(cfg: &Config) -> Result<()> {
     if names.len() != cfg.upstreams.len() {
         anyhow::bail!("duplicate upstream pool names");
     }
+    for u in &cfg.upstreams {
+        validate_upstream_tls(&u.name, &u.tls)?;
+    }
     let auth_names: HashSet<&str> = cfg.auth.iter().map(|a| a.name.as_str()).collect();
     if auth_names.len() != cfg.auth.len() {
         anyhow::bail!("duplicate auth block names");
     }
-    validate_authorizers(&cfg.authorizers)?;
+    validate_authorizers(cfg)?;
     // Fail fast on a malformed trusted-proxy entry rather than silently
     // trusting nobody at runtime (same parsing as headers::ForwardedPolicy).
     for entry in &cfg.forwarded.trusted_proxies {
@@ -1728,6 +1822,75 @@ bind = "127.0.0.1:9090"
         ] {
             let cfg: Config = toml::from_str(&authorizer_cfg(authz, route_extra)).unwrap();
             let err = validate(&cfg).unwrap_err().to_string();
+            assert!(err.contains(want), "{authz}: expected '{want}' in '{err}'");
+        }
+    }
+
+    #[test]
+    fn upstream_tls_validation() {
+        let pool = |tls: &str| {
+            format!(
+                "{MIN}\n[[upstreams]]\nname=\"a\"\nmembers=[{{address=\"127.0.0.1:1\", scheme=\"https\"}}]\n\
+                 tls={{{tls}}}\n[[routes]]\npath_prefix=\"/x\"\nupstream=\"a\"\n"
+            )
+        };
+        let ok: Config = toml::from_str(&pool(
+            "ca_path=\"ca.pem\", cert_path=\"c.pem\", key_path=\"k.pem\", server_name=\"authz.internal\"",
+        ))
+        .unwrap();
+        validate(&ok).unwrap();
+        assert_eq!(
+            ok.upstreams[0].tls.server_name.as_deref(),
+            Some("authz.internal")
+        );
+
+        for (tls, want) in [
+            ("cert_path=\"c.pem\"", "set together"),
+            ("skip_verify=true, ca_path=\"ca.pem\"", "skip_verify"),
+            ("skip_verify=true, server_name=\"x\"", "skip_verify"),
+            ("server_name=\"not a name!\"", "invalid tls.server_name"),
+        ] {
+            let cfg: Config = toml::from_str(&pool(tls)).unwrap();
+            let err = format!("{:#}", validate(&cfg).unwrap_err());
+            assert!(err.contains(want), "{tls}: expected '{want}' in '{err}'");
+        }
+        // skip_verify with a client cert is allowed (mTLS without server checks).
+        let cfg: Config = toml::from_str(&pool(
+            "skip_verify=true, cert_path=\"c.pem\", key_path=\"k.pem\"",
+        ))
+        .unwrap();
+        validate(&cfg).unwrap();
+    }
+
+    #[test]
+    fn authorizer_upstream_target_validation() {
+        let ok: Config = toml::from_str(&authorizer_cfg(
+            "upstream=\"a\"\npath=\"/v1/authorize\"\nretries=2",
+            "",
+        ))
+        .unwrap();
+        validate(&ok).unwrap();
+        assert_eq!(ok.authorizers[0].upstream.as_deref(), Some("a"));
+
+        let default_retries: Config =
+            toml::from_str(&authorizer_cfg("upstream=\"a\"", "")).unwrap();
+        validate(&default_retries).unwrap();
+        assert_eq!(default_retries.authorizers[0].retries, 1);
+
+        for (authz, want) in [
+            ("url=\"http://x/\"\nupstream=\"a\"", "not both"),
+            ("timeout_ms=100", "one of url or upstream"),
+            ("upstream=\"nope\"", "unknown upstream pool"),
+            ("url=\"http://x/\"\npath=\"/v1\"", "only used with upstream"),
+            ("upstream=\"a\"\npath=\"v1\"", "path"),
+            (
+                "upstream=\"a\"\ntls={ca_path=\"ca.pem\"}",
+                "per [[upstreams]] pool",
+            ),
+            ("upstream=\"a\"\nretries=4", "retries must be 0-3"),
+        ] {
+            let cfg: Config = toml::from_str(&authorizer_cfg(authz, "")).unwrap();
+            let err = format!("{:#}", validate(&cfg).unwrap_err());
             assert!(err.contains(want), "{authz}: expected '{want}' in '{err}'");
         }
     }

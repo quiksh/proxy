@@ -30,15 +30,22 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use bytes::Bytes;
 use http::header::{CACHE_CONTROL, CONTENT_TYPE, USER_AGENT, WWW_AUTHENTICATE};
-use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, Uri};
+use http::uri::PathAndQuery;
+use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, Uri};
 use http_body_util::{BodyExt, Full, Limited};
+use hyper::body::Incoming;
 use metrics::{Counter, Histogram};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use super::Claims;
 use super::cache::{CacheHint, VerdictCache};
-use crate::config::{AuthorizerConfig, AuthorizerOnError};
-use crate::upstream::{ProxyClient, into_proxy_body};
+use crate::config::{
+    AUTHORIZER_MAX_RETRIES, AuthorizerConfig, AuthorizerOnError, UpstreamHttpVersion,
+};
+use crate::upstream::{
+    InflightGuard, Pool, ProxyClient, Upstream, UpstreamPoolEntry, fire_failure, into_proxy_body,
+};
 
 /// Cap on the authorizer's response body (allow or deny). A larger response
 /// is treated as an authorizer error rather than buffered.
@@ -56,6 +63,8 @@ pub struct AuthorizerMetrics {
     pub error_denied: Counter,
     pub error_allowed: Counter,
     pub spoofed_header: Counter,
+    /// Pool targets: attempts retried on another member.
+    pub retry: Counter,
     duration: Histogram,
 }
 
@@ -73,6 +82,9 @@ impl AuthorizerMetrics {
             error_denied: c("error_denied"),
             error_allowed: c("error_allowed"),
             spoofed_header: c("spoofed_header"),
+            retry: metrics::counter!("quik_authorizer_retries_total",
+                "authorizer" => name.to_owned()
+            ),
             duration: metrics::histogram!("quik_authorizer_duration_seconds",
                 "authorizer" => name.to_owned()
             ),
@@ -87,14 +99,29 @@ pub struct HttpAuthorizer {
     /// `Some(cap)` when the request body is sent (`include_body`).
     body_limit: Option<u64>,
     body_timeout: Duration,
-    uri: Uri,
+    target: Target,
+    /// Extra attempts on a different pool member (pool targets only).
+    retries: u32,
     timeout: Duration,
     forward_headers: Vec<HeaderName>,
     inject_headers: Vec<HeaderName>,
-    client: ProxyClient,
     /// Verdict cache, when `[authorizers.cache].ttl_seconds > 0`.
     cache: Option<VerdictCache>,
 }
+
+/// Where envelopes are sent.
+enum Target {
+    /// A fixed URL with the authorizer's own client (and `tls` settings).
+    /// Boxed: the client is much larger than the `Pool` variant.
+    Url { uri: Uri, client: Box<ProxyClient> },
+    /// Members of an `[[upstreams]]` pool, resolved per request so admin-API
+    /// and NATS membership changes apply immediately. Uses the pool's client,
+    /// balancer, and passive health.
+    Pool { pool: String, path: PathAndQuery },
+}
+
+/// Most attempts a pooled call makes (`1 + AUTHORIZER_MAX_RETRIES`).
+const MAX_ATTEMPTS: usize = 1 + AUTHORIZER_MAX_RETRIES as usize;
 
 /// What the authorizer sees of the inbound request.
 pub struct AuthzRequest<'a> {
@@ -161,11 +188,26 @@ impl HttpAuthorizer {
             on_error: cfg.on_error,
             body_limit: cfg.include_body.then_some(cfg.max_body_bytes),
             body_timeout: Duration::from_millis(cfg.body_timeout_ms),
-            uri: cfg.url.parse().context("parsing authorizer url")?,
+            target: match (&cfg.url, &cfg.upstream) {
+                (Some(url), _) => Target::Url {
+                    uri: url.parse().context("parsing authorizer url")?,
+                    client: Box::new(client),
+                },
+                (None, Some(pool)) => Target::Pool {
+                    pool: pool.clone(),
+                    path: cfg
+                        .path
+                        .as_deref()
+                        .unwrap_or("/")
+                        .parse()
+                        .context("parsing authorizer path")?,
+                },
+                (None, None) => anyhow::bail!("authorizer needs url or upstream"),
+            },
+            retries: cfg.retries.min(AUTHORIZER_MAX_RETRIES),
             timeout: Duration::from_millis(cfg.timeout_ms),
             forward_headers: parse_names(&cfg.forward_headers)?,
             inject_headers: parse_names(&cfg.inject_headers)?,
-            client,
             cache: VerdictCache::from_config(&cfg.name, &cfg.cache)?,
         })
     }
@@ -199,7 +241,9 @@ impl HttpAuthorizer {
     /// With a cache configured, a live cached verdict for the same key is
     /// returned without calling out; a fresh allow/deny is stored per the
     /// response's `Cache-Control`. Errors are never cached.
-    pub async fn authorize(&self, req: AuthzRequest<'_>) -> Result<AuthzVerdict> {
+    ///
+    /// `pools` resolves a pool target's members (the proxy's live pool set).
+    pub async fn authorize(&self, req: AuthzRequest<'_>, pools: &Pool) -> Result<AuthzVerdict> {
         let key = self
             .cache
             .as_ref()
@@ -210,7 +254,7 @@ impl HttpAuthorizer {
             return Ok((*hit).clone());
         }
         let started = Instant::now();
-        let result = tokio::time::timeout(self.timeout, self.call(req))
+        let result = tokio::time::timeout(self.timeout, self.call(req, pools))
             .await
             .unwrap_or_else(|_| Err(anyhow::anyhow!("timed out after {:?}", self.timeout)));
         self.metrics
@@ -223,18 +267,84 @@ impl HttpAuthorizer {
         Ok(verdict)
     }
 
-    async fn call(&self, req: AuthzRequest<'_>) -> Result<(AuthzVerdict, CacheHint)> {
-        let body = serde_json::to_vec(&self.envelope(&req)).context("encoding envelope")?;
-        let out = Request::post(self.uri.clone())
-            .header(CONTENT_TYPE, "application/json")
-            .header(USER_AGENT, "quik-authorizer")
-            .body(into_proxy_body(Full::new(Bytes::from(body))))
-            .context("building authorizer request")?;
-        let resp = self
-            .client
-            .request(out)
-            .await
-            .context("authorizer request")?;
+    async fn call(&self, req: AuthzRequest<'_>, pools: &Pool) -> Result<(AuthzVerdict, CacheHint)> {
+        let body =
+            Bytes::from(serde_json::to_vec(&self.envelope(&req)).context("encoding envelope")?);
+        let resp = match &self.target {
+            Target::Url { uri, client } => client
+                .request(envelope_request(uri.clone(), None, body)?)
+                .await
+                .context("authorizer request")?,
+            Target::Pool { pool, path } => self.send_pooled(pools, pool, path, body).await?,
+        };
+        self.interpret(resp).await
+    }
+
+    /// POST to a pool member chosen by the pool's balancer. On a connection
+    /// error or 5xx, record the failure against the member (passive health)
+    /// and retry on a member not yet tried, up to `retries` times. The
+    /// caller's `timeout_ms` bounds all attempts together.
+    async fn send_pooled(
+        &self,
+        pools: &Pool,
+        pool_name: &str,
+        path: &PathAndQuery,
+        body: Bytes,
+    ) -> Result<Response<Incoming>> {
+        let pool = pools
+            .get(pool_name)
+            .with_context(|| format!("upstream pool '{pool_name}' not found"))?;
+        let version = match pool.http_version {
+            UpstreamHttpVersion::H1 => http::Version::HTTP_11,
+            UpstreamHttpVersion::H2 => http::Version::HTTP_2,
+        };
+        let mut tried: [Option<Arc<Upstream>>; MAX_ATTEMPTS] = Default::default();
+        let mut last_err = None;
+        for attempt in 0..=self.retries as usize {
+            let snapshot = pool.members_snapshot();
+            let Some((member, _inflight)) = pick_untried(&pool, &snapshot, &tried) else {
+                break;
+            };
+            if attempt > 0 {
+                self.metrics.retry.increment(1);
+            }
+            let uri = Uri::builder()
+                .scheme(member.scheme.clone())
+                .authority(member.authority.clone())
+                .path_and_query(path.clone())
+                .build()
+                .context("building authorizer member uri")?;
+            match pool
+                .client
+                .request(envelope_request(uri, Some(version), body.clone())?)
+                .await
+            {
+                Ok(resp) if resp.status().is_server_error() => {
+                    fire_failure(&member.health, &pool.name, &member.name);
+                    last_err = Some(anyhow::anyhow!(
+                        "authorizer member {} returned {}",
+                        member.name,
+                        resp.status()
+                    ));
+                }
+                Ok(resp) => {
+                    member.health.record_success();
+                    return Ok(resp);
+                }
+                Err(e) => {
+                    fire_failure(&member.health, &pool.name, &member.name);
+                    last_err = Some(
+                        anyhow::Error::new(e).context(format!("authorizer member {}", member.name)),
+                    );
+                }
+            }
+            tried[attempt] = Some(member);
+        }
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no eligible member in pool '{pool_name}'")))
+    }
+
+    /// Map an authorizer response to a verdict (see the module docs).
+    async fn interpret(&self, resp: Response<Incoming>) -> Result<(AuthzVerdict, CacheHint)> {
         let status = resp.status();
         let hint = CacheHint::from_cache_control(
             resp.headers()
@@ -361,6 +471,42 @@ fn has_escaped_controls(b: &[u8]) -> bool {
         .any(|&c| (c < 0x20 && !matches!(c, b'\t' | b'\n' | b'\r')) || c == 0x7f)
 }
 
+/// The POST carrying the envelope. `version` pins the HTTP version for pool
+/// targets (it must match the pool client's ALPN, as on the proxy path).
+fn envelope_request(
+    uri: Uri,
+    version: Option<http::Version>,
+    body: Bytes,
+) -> Result<Request<crate::upstream::ProxyBody>> {
+    let mut b = Request::post(uri)
+        .header(CONTENT_TYPE, "application/json")
+        .header(USER_AGENT, "quik-authorizer");
+    if let Some(v) = version {
+        b = b.version(v);
+    }
+    b.body(into_proxy_body(Full::new(body)))
+        .context("building authorizer request")
+}
+
+/// Ask the pool's balancer for a routable member not already tried. Each
+/// `pick` bumps the member's in-flight count; the returned guard undoes it
+/// (and is dropped immediately for a rejected, already-tried pick).
+fn pick_untried(
+    pool: &UpstreamPoolEntry,
+    members: &[Arc<Upstream>],
+    tried: &[Option<Arc<Upstream>>],
+) -> Option<(Arc<Upstream>, InflightGuard)> {
+    for _ in 0..members.len() {
+        let m = pool.balancer.pick(members)?;
+        let guard = InflightGuard::for_picked(m.health.clone());
+        if tried.iter().flatten().any(|t| Arc::ptr_eq(t, m)) {
+            continue;
+        }
+        return Some((m.clone(), guard));
+    }
+    None
+}
+
 async fn read_capped<B>(body: B) -> Result<Bytes>
 where
     B: hyper::body::Body<Data = Bytes>,
@@ -380,7 +526,10 @@ mod tests {
     fn authorizer(inject: &[&str]) -> HttpAuthorizer {
         let cfg = AuthorizerConfig {
             name: "t".into(),
-            url: "http://127.0.0.1:1/".into(),
+            url: Some("http://127.0.0.1:1/".into()),
+            upstream: None,
+            path: None,
+            retries: 1,
             timeout_ms: 100,
             forward_headers: vec!["authorization".into()],
             inject_headers: inject.iter().map(|s| s.to_string()).collect(),
