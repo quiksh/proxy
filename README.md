@@ -30,7 +30,8 @@ small HTTP admin API.
 - **JWT authentication** with JWKS auto-refresh on `kid` miss; verified
   claims project into upstream-bound headers.
 - **External HTTP authorisers**: an alternative to API Gateway Lambda
-  authorisers without cold starts. quik POSTs a JSON summary of the request to
+  authorisers without cold starts. They can target an upstream pool for HA
+  (balancing, health checks, retries). quik POSTs a JSON summary of the request to
   your service, uses its status to allow or deny, and injects the headers it
   returns, restricted to an allowlist
   ([docs/config-reference.md](docs/config-reference.md#authorizers)). A mock

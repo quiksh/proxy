@@ -56,7 +56,7 @@ use crate::headers::{
 };
 use crate::routing::SharedRoutingTable;
 use crate::shutdown::Coordinator;
-use crate::upstream::{CountingBody, InflightGuard, Pool, ProxyBody};
+use crate::upstream::{CountingBody, InflightGuard, Pool, ProxyBody, fire_failure};
 
 /// Per-request context that flows through the forward pipeline alongside the
 /// borrowed routing table / upstream pool. Cheap to clone (the policy is an
@@ -392,6 +392,7 @@ async fn forward_inner(
         &mut parts,
         body,
         AuthCtx {
+            upstreams,
             auth_name: auth_name.as_deref(),
             authorizer_name: authorizer_name.as_deref(),
             max_body_bytes: modules.max_body_bytes,
@@ -649,21 +650,6 @@ fn error_chain<E: std::error::Error + ?Sized>(e: &E) -> String {
 /// the failure that crosses the ejection threshold, also fire the ejection
 /// counter + a warning log so operators can correlate. Keeps the metric
 /// call out of the steady-state success path.
-fn fire_failure(health: &crate::upstream::UpstreamHealth, pool_name: &str, member_name: &str) {
-    if health.record_failure() {
-        metrics::counter!("quik_upstream_ejections_total",
-            "pool" => pool_name.to_string(),
-            "member" => member_name.to_string()
-        )
-        .increment(1);
-        tracing::warn!(
-            pool = %pool_name,
-            member = %member_name,
-            "ejecting unhealthy upstream"
-        );
-    }
-}
-
 /// Extract the opt-in access-log field values from a request's headers. Each
 /// is `Some` only when configured and present (and a valid header string).
 /// Pure, so it's unit-testable without a tracing subscriber.
@@ -890,6 +876,7 @@ async fn handle_ws_upgrade(
         &mut head,
         body,
         AuthCtx {
+            upstreams,
             auth_name: auth_name.as_deref(),
             authorizer_name: authorizer_name.as_deref(),
             max_body_bytes: None,
@@ -1123,6 +1110,8 @@ impl InboundBody {
 
 /// Per-request inputs to [`authenticate`].
 struct AuthCtx<'a> {
+    /// Live upstream pools, for authorizers that target a pool.
+    upstreams: &'a Pool,
     auth_name: Option<&'a str>,
     authorizer_name: Option<&'a str>,
     /// The route's `max_body_bytes`, honoured when buffering for an authorizer.
@@ -1203,16 +1192,19 @@ async fn apply_route_authorizer(
         InboundBody::Streaming(_) => None,
     };
     let verdict = authz
-        .authorize(AuthzRequest {
-            method: &head.method,
-            uri: &head.uri,
-            headers: &head.headers,
-            source_ip: ctx.peer_ip,
-            route: ctx.route_label,
-            request_id: ctx.request_id,
-            claims,
-            body: buffered,
-        })
+        .authorize(
+            AuthzRequest {
+                method: &head.method,
+                uri: &head.uri,
+                headers: &head.headers,
+                source_ip: ctx.peer_ip,
+                route: ctx.route_label,
+                request_id: ctx.request_id,
+                claims,
+                body: buffered,
+            },
+            ctx.upstreams,
+        )
         .await;
     match verdict {
         Ok(AuthzVerdict::Allow(inject)) => {
