@@ -13,14 +13,21 @@
 //! - **anything else** (3xx, 5xx, timeout, connect error, malformed 2xx body)
 //!   - the authorizer gave no verdict; the caller applies `on_error`.
 //!
+//! With `include_body`, the caller buffers the request body (capped) and it
+//! rides in the envelope as `body` - verbatim when UTF-8, else base64 with
+//! `is_base64_encoded: true`. The same bytes are then forwarded upstream.
+//!
 //! The authorizer client keeps pooled keep-alive connections, so the steady
 //! state cost is one round trip on a warm connection.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use bytes::Bytes;
 use http::header::{CONTENT_TYPE, USER_AGENT, WWW_AUTHENTICATE};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, Uri};
@@ -76,6 +83,8 @@ pub struct HttpAuthorizer {
     pub name: String,
     pub metrics: AuthorizerMetrics,
     pub on_error: AuthorizerOnError,
+    /// `Some(cap)` when the request body is sent (`include_body`).
+    body_limit: Option<u64>,
     uri: Uri,
     timeout: Duration,
     forward_headers: Vec<HeaderName>,
@@ -93,6 +102,8 @@ pub struct AuthzRequest<'a> {
     pub request_id: &'a str,
     /// Verified JWT claims, when the route also has an `auth` block.
     pub claims: Option<&'a Claims>,
+    /// The buffered request body, when `include_body` is set.
+    pub body: Option<&'a Bytes>,
 }
 
 #[derive(Debug)]
@@ -120,6 +131,10 @@ struct Envelope<'a> {
     headers: BTreeMap<&'a str, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     claims: Option<&'a Claims>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body: Option<Cow<'a, str>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_base64_encoded: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -140,12 +155,19 @@ impl HttpAuthorizer {
             name: cfg.name.clone(),
             metrics: AuthorizerMetrics::new(&cfg.name),
             on_error: cfg.on_error,
+            body_limit: cfg.include_body.then_some(cfg.max_body_bytes),
             uri: cfg.url.parse().context("parsing authorizer url")?,
             timeout: Duration::from_millis(cfg.timeout_ms),
             forward_headers: parse_names(&cfg.forward_headers)?,
             inject_headers: parse_names(&cfg.inject_headers)?,
             client,
         })
+    }
+
+    /// The body cap when this authorizer wants the request body, else `None`
+    /// (the body streams to the upstream untouched).
+    pub fn body_limit(&self) -> Option<u64> {
+        self.body_limit
     }
 
     /// SECURITY: the first `inject_headers` name present on the inbound
@@ -232,6 +254,13 @@ impl HttpAuthorizer {
             .get(http::header::HOST)
             .and_then(|h| h.to_str().ok())
             .or_else(|| req.uri.authority().map(|a| a.as_str()));
+        let (body, is_base64_encoded) = match req.body {
+            Some(b) => match std::str::from_utf8(b) {
+                Ok(s) => (Some(Cow::Borrowed(s)), Some(false)),
+                Err(_) => (Some(Cow::Owned(BASE64.encode(b))), Some(true)),
+            },
+            None => (None, None),
+        };
         Envelope {
             version: ENVELOPE_VERSION,
             request_id: req.request_id,
@@ -243,6 +272,8 @@ impl HttpAuthorizer {
             query: req.uri.query(),
             headers,
             claims: req.claims,
+            body,
+            is_base64_encoded,
         }
     }
 
@@ -305,6 +336,8 @@ mod tests {
             forward_headers: vec!["authorization".into()],
             inject_headers: inject.iter().map(|s| s.to_string()).collect(),
             on_error: AuthorizerOnError::Deny,
+            include_body: false,
+            max_body_bytes: 1024,
             tls: Default::default(),
         };
         HttpAuthorizer::build(&cfg, super::super::client::build_jwks_client_skip_verify()).unwrap()
@@ -379,6 +412,7 @@ mod tests {
             route: "/v1",
             request_id: "rid",
             claims: None,
+            body: None,
         };
         let v = serde_json::to_value(a.envelope(&req)).unwrap();
         assert_eq!(v["method"], "POST");
@@ -389,5 +423,33 @@ mod tests {
         assert_eq!(v["headers"]["authorization"], "Bearer t");
         assert!(v["headers"].get("cookie").is_none());
         assert!(v.get("claims").is_none());
+        assert!(v.get("body").is_none());
+        assert!(v.get("is_base64_encoded").is_none());
+    }
+
+    #[test]
+    fn envelope_body_is_verbatim_utf8_or_base64() {
+        let a = authorizer(&[]);
+        let headers = HeaderMap::new();
+        let uri: Uri = "/".parse().unwrap();
+        let encode = |body: &Bytes| {
+            let req = AuthzRequest {
+                method: &Method::POST,
+                uri: &uri,
+                headers: &headers,
+                source_ip: "10.0.0.1".parse().unwrap(),
+                route: "/",
+                request_id: "rid",
+                claims: None,
+                body: Some(body),
+            };
+            serde_json::to_value(a.envelope(&req)).unwrap()
+        };
+        let v = encode(&Bytes::from_static(br#"{"amount":5}"#));
+        assert_eq!(v["body"], r#"{"amount":5}"#);
+        assert_eq!(v["is_base64_encoded"], false);
+        let v = encode(&Bytes::from_static(&[0xff, 0x00, 0x10]));
+        assert_eq!(v["body"], "/wAQ");
+        assert_eq!(v["is_base64_encoded"], true);
     }
 }

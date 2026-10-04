@@ -386,20 +386,26 @@ async fn forward_inner(
     }
 
     // ── auth + authorizer modules ────────────────────────────────────────────
-    if let Err(resp) = authenticate(
+    // The body stays streaming unless the route's authorizer asks to see it.
+    let body = match authenticate(
         auth,
-        auth_name.as_deref(),
-        authorizer_name.as_deref(),
         &mut parts,
-        peer_ip,
-        &request_id,
-        &route_label,
-        start,
+        body,
+        AuthCtx {
+            auth_name: auth_name.as_deref(),
+            authorizer_name: authorizer_name.as_deref(),
+            max_body_bytes: modules.max_body_bytes,
+            peer_ip,
+            request_id: &request_id,
+            route_label: &route_label,
+            start,
+        },
     )
     .await
     {
-        return *resp;
-    }
+        Ok(b) => b,
+        Err(resp) => return *resp,
+    };
 
     let pool = match upstreams.get(&pool_name) {
         Some(p) => p,
@@ -518,10 +524,8 @@ async fn forward_inner(
     // errors past the byte limit. The upstream sees a body-read failure,
     // which surfaces to us as a normal upstream error response - the client
     // doesn't get a 413 for the chunked case (we've already started forwarding).
-    let body: ProxyBody = match modules.max_body_bytes {
-        Some(max) => into_proxy_body(Limited::new(body, max as usize)),
-        None => into_proxy_body(body),
-    };
+    // A body buffered for the authorizer was already capped at the route limit.
+    let body: ProxyBody = body.into_proxy_body(modules.max_body_bytes);
     // Bytes-sent counter: every data frame on this body (proxy → upstream)
     // adds to the per-member quik_upstream_bytes_sent_total counter.
     let body: ProxyBody = into_proxy_body(CountingBody::new(body, target.bytes_sent.clone()));
@@ -881,21 +885,26 @@ async fn handle_ws_upgrade(
     // the authorizer. Split + reassemble keeps the extensions (incl. hyper's
     // pending upgrade) intact.
     let (mut head, body) = req.into_parts();
-    if let Err(resp) = authenticate(
+    let body = match authenticate(
         auth,
-        auth_name.as_deref(),
-        authorizer_name.as_deref(),
         &mut head,
-        peer_ip,
-        &request_id,
-        &route_label,
-        start,
+        body,
+        AuthCtx {
+            auth_name: auth_name.as_deref(),
+            authorizer_name: authorizer_name.as_deref(),
+            max_body_bytes: None,
+            peer_ip,
+            request_id: &request_id,
+            route_label: &route_label,
+            start,
+        },
     )
     .await
     {
-        return *resp;
-    }
-    let mut req = Request::from_parts(head, body);
+        Ok(b) => b,
+        Err(resp) => return *resp,
+    };
+    let mut req = Request::from_parts(head, body.into_proxy_body(None));
 
     let pool = match upstreams.get(&pool_name) {
         Some(p) => p,
@@ -979,7 +988,6 @@ async fn handle_ws_upgrade(
         );
     }
 
-    let body: ProxyBody = into_proxy_body(body);
     let out_req = Request::from_parts(parts, body);
 
     let mut upstream_resp = match pool.client.request(out_req).await {
@@ -1091,62 +1099,76 @@ async fn handle_ws_upgrade(
 /// on every `Result` carrying it.
 type Rejection = Box<Response<ProxyBody>>;
 
-/// Run the route's `auth` (JWT) and then `authorizer` (external HTTP) modules
-/// against the request head. On rejection, records the terminal access-log
-/// line and returns the response to send. Shared by the plain forwarding path
-/// and the WebSocket upgrade path so an `Upgrade` request can't bypass either.
-#[allow(clippy::too_many_arguments)]
-async fn authenticate(
-    auth: &SharedAuthRegistry,
-    auth_name: Option<&str>,
-    authorizer_name: Option<&str>,
-    head: &mut http::request::Parts,
-    peer_ip: IpAddr,
-    request_id: &str,
-    route_label: &Arc<str>,
-    start: Instant,
-) -> Result<(), Rejection> {
-    let claims = match auth_name {
-        Some(name) => {
-            Some(apply_route_auth(auth, name, &mut head.headers, route_label, start).await?)
-        }
-        None => None,
-    };
-    if let Some(name) = authorizer_name {
-        apply_route_authorizer(
-            auth,
-            name,
-            head,
-            AuthzCtx {
-                peer_ip,
-                request_id,
-                claims: claims.as_ref(),
-                route_label,
-                start,
-            },
-        )
-        .await?;
-    }
-    Ok(())
+/// Inbound request body after the auth stage: still streaming (the default -
+/// forwarded end-to-end without buffering) or buffered because the route's
+/// authorizer has `include_body` set.
+enum InboundBody {
+    Streaming(Incoming),
+    Buffered(Bytes),
 }
 
-/// Per-request context for [`apply_route_authorizer`].
-struct AuthzCtx<'a> {
+impl InboundBody {
+    /// Box for forwarding. `limit` wraps a streaming body in the route's
+    /// `max_body_bytes` cap; a buffered body was already checked against it.
+    fn into_proxy_body(self, limit: Option<u64>) -> ProxyBody {
+        match (self, limit) {
+            (InboundBody::Streaming(b), Some(max)) => {
+                into_proxy_body(Limited::new(b, max as usize))
+            }
+            (InboundBody::Streaming(b), None) => into_proxy_body(b),
+            (InboundBody::Buffered(b), _) => into_proxy_body(Full::new(b)),
+        }
+    }
+}
+
+/// Per-request inputs to [`authenticate`].
+struct AuthCtx<'a> {
+    auth_name: Option<&'a str>,
+    authorizer_name: Option<&'a str>,
+    /// The route's `max_body_bytes`, honoured when buffering for an authorizer.
+    max_body_bytes: Option<u64>,
     peer_ip: IpAddr,
     request_id: &'a str,
-    claims: Option<&'a Claims>,
     route_label: &'a Arc<str>,
     start: Instant,
 }
 
+/// Run the route's `auth` (JWT) and then `authorizer` (external HTTP) modules
+/// against the request. On rejection, records the terminal access-log line and
+/// returns the response to send. Shared by the plain forwarding path and the
+/// WebSocket upgrade path so an `Upgrade` request can't bypass either.
+///
+/// JWT runs first so an unauthenticated request is rejected before its body is
+/// read. The body is only buffered when the authorizer needs to see it.
+async fn authenticate(
+    auth: &SharedAuthRegistry,
+    head: &mut http::request::Parts,
+    body: Incoming,
+    ctx: AuthCtx<'_>,
+) -> Result<InboundBody, Rejection> {
+    let claims = match ctx.auth_name {
+        Some(name) => {
+            Some(apply_route_auth(auth, name, &mut head.headers, ctx.route_label, ctx.start).await?)
+        }
+        None => None,
+    };
+    let Some(name) = ctx.authorizer_name else {
+        return Ok(InboundBody::Streaming(body));
+    };
+    apply_route_authorizer(auth, name, head, body, claims.as_ref(), &ctx).await
+}
+
 /// Consult the route's external authorizer. Allow → write its headers into
 /// `head`; deny → relay its 4xx; no verdict → `on_error` (503 or fail open).
+/// Returns the body to forward - buffered if the authorizer saw it.
 async fn apply_route_authorizer(
     auth: &SharedAuthRegistry,
     name: &str,
     head: &mut http::request::Parts,
-    ctx: AuthzCtx<'_>,
-) -> Result<(), Rejection> {
+    body: Incoming,
+    claims: Option<&Claims>,
+    ctx: &AuthCtx<'_>,
+) -> Result<InboundBody, Rejection> {
     let Some(authz) = auth.get_authorizer(name) else {
         tracing::error!(authorizer = %name, "route references missing authorizer - config drift");
         metrics::counter!("quik_proxy_errors_total", "kind" => "authorizer_misconfig").increment(1);
@@ -1166,6 +1188,18 @@ async fn apply_route_authorizer(
             "auth rejected",
         )));
     }
+    let body = match authz.body_limit() {
+        Some(cap) => {
+            // The route's own cap still applies to the buffered body.
+            let cap = ctx.max_body_bytes.map_or(cap, |route| cap.min(route));
+            InboundBody::Buffered(buffer_body(&head.headers, body, cap, ctx).await?)
+        }
+        None => InboundBody::Streaming(body),
+    };
+    let buffered = match &body {
+        InboundBody::Buffered(b) => Some(b),
+        InboundBody::Streaming(_) => None,
+    };
     let verdict = authz
         .authorize(AuthzRequest {
             method: &head.method,
@@ -1174,7 +1208,8 @@ async fn apply_route_authorizer(
             source_ip: ctx.peer_ip,
             route: ctx.route_label,
             request_id: ctx.request_id,
-            claims: ctx.claims,
+            claims,
+            body: buffered,
         })
         .await;
     match verdict {
@@ -1183,16 +1218,16 @@ async fn apply_route_authorizer(
             for (k, v) in inject {
                 head.headers.insert(k, v);
             }
-            Ok(())
+            Ok(body)
         }
         Ok(AuthzVerdict::Deny {
             status,
             headers,
-            body,
+            body: deny_body,
         }) => {
             authz.metrics.deny.increment(1);
             record_terminal(ctx.route_label, status.as_u16(), ctx.start, None);
-            let mut resp = Response::new(into_proxy_body(Full::new(body)));
+            let mut resp = Response::new(into_proxy_body(Full::new(deny_body)));
             *resp.status_mut() = status;
             *resp.headers_mut() = headers;
             Err(Box::new(resp))
@@ -1200,7 +1235,7 @@ async fn apply_route_authorizer(
         Err(e) if authz.on_error == AuthorizerOnError::Allow => {
             authz.metrics.error_allowed.increment(1);
             tracing::warn!(authorizer = %name, error = %e, "authorizer failed - on_error=allow, forwarding");
-            Ok(())
+            Ok(body)
         }
         Err(e) => {
             authz.metrics.error_denied.increment(1);
@@ -1209,6 +1244,42 @@ async fn apply_route_authorizer(
             Err(Box::new(synth(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "authorizer unavailable\n",
+            )))
+        }
+    }
+}
+
+/// Read the whole request body for an authorizer, up to `cap` bytes. A declared
+/// `Content-Length` over the cap is rejected before reading; a chunked body
+/// that grows past it is rejected mid-read. Either way the client gets 413.
+async fn buffer_body(
+    headers: &HeaderMap,
+    body: Incoming,
+    cap: u64,
+    ctx: &AuthCtx<'_>,
+) -> Result<Bytes, Rejection> {
+    let too_large = || {
+        metrics::counter!("quik_proxy_errors_total", "kind" => "body_too_large").increment(1);
+        record_terminal(ctx.route_label, 413, ctx.start, None);
+        Box::new(synth(StatusCode::PAYLOAD_TOO_LARGE, "body too large\n"))
+    };
+    if let Some(n) = headers
+        .get(CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        && n > cap
+    {
+        return Err(too_large());
+    }
+    match Limited::new(body, cap as usize).collect().await {
+        Ok(c) => Ok(c.to_bytes()),
+        Err(e) if e.is::<http_body_util::LengthLimitError>() => Err(too_large()),
+        Err(e) => {
+            tracing::debug!(error = %e, "client body read failed while buffering for authorizer");
+            record_terminal(ctx.route_label, 400, ctx.start, None);
+            Err(Box::new(synth(
+                StatusCode::BAD_REQUEST,
+                "bad request body\n",
             )))
         }
     }

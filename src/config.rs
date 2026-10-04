@@ -251,6 +251,15 @@ pub struct AuthorizerConfig {
     /// error, 5xx, malformed 2xx body). Default `deny` → 503.
     #[serde(default)]
     pub on_error: AuthorizerOnError,
+    /// Buffer the request body (up to `max_body_bytes`) and include it in the
+    /// envelope. Off by default: bodies otherwise stream to the upstream
+    /// without buffering.
+    #[serde(default)]
+    pub include_body: bool,
+    /// Body cap when `include_body` is set. Larger bodies get 413. The route's
+    /// own `max_body_bytes`, when lower, also applies.
+    #[serde(default = "default_authorizer_max_body_bytes")]
+    pub max_body_bytes: u64,
     #[serde(default)]
     pub tls: AuthorizerTlsConfig,
 }
@@ -258,6 +267,14 @@ pub struct AuthorizerConfig {
 fn default_authorizer_timeout_ms() -> u64 {
     1000
 }
+
+fn default_authorizer_max_body_bytes() -> u64 {
+    64 * 1024
+}
+
+/// Hard ceiling on `[[authorizers]].max_body_bytes`: every in-flight request on
+/// such a route holds its body in memory.
+pub const AUTHORIZER_MAX_BODY_CEILING: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -1131,6 +1148,14 @@ fn validate_authorizers(authorizers: &[AuthorizerConfig]) -> Result<()> {
                 anyhow::bail!("{}: header '{h}' cannot be injected", ctx());
             }
         }
+        if a.include_body
+            && (a.max_body_bytes == 0 || a.max_body_bytes > AUTHORIZER_MAX_BODY_CEILING)
+        {
+            anyhow::bail!(
+                "{}: max_body_bytes must be between 1 and {AUTHORIZER_MAX_BODY_CEILING}",
+                ctx()
+            );
+        }
         if a.tls.cert_path.is_some() != a.tls.key_path.is_some() {
             anyhow::bail!(
                 "{}: tls.cert_path and tls.key_path must be set together",
@@ -1575,6 +1600,11 @@ bind = "127.0.0.1:9090"
                 "url=\"http://x/\"\ntls={cert_path=\"c.pem\"}",
                 "",
                 "set together",
+            ),
+            (
+                "url=\"http://x/\"\ninclude_body=true\nmax_body_bytes=2000000",
+                "",
+                "max_body_bytes must be",
             ),
         ] {
             let cfg: Config = toml::from_str(&authorizer_cfg(authz, route_extra)).unwrap();

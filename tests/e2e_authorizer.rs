@@ -93,7 +93,17 @@ fn authorizer_config(addr: SocketAddr) -> AuthorizerConfig {
         forward_headers: vec!["authorization".into(), "x-api-key".into()],
         inject_headers: vec!["x-user-id".into(), "x-tenant-id".into()],
         on_error: AuthorizerOnError::Deny,
+        include_body: false,
+        max_body_bytes: 64 * 1024,
         tls: Default::default(),
+    }
+}
+
+fn with_body(addr: SocketAddr, max_body_bytes: u64) -> AuthorizerConfig {
+    AuthorizerConfig {
+        include_body: true,
+        max_body_bytes,
+        ..authorizer_config(addr)
     }
 }
 
@@ -169,6 +179,10 @@ async fn allow_injects_allowlisted_headers_and_sends_envelope() {
         "only forward_headers are sent"
     );
     assert!(env["request_id"].as_str().is_some_and(|s| !s.is_empty()));
+    assert!(
+        env.get("body").is_none(),
+        "body only sent with include_body"
+    );
 }
 
 #[tokio::test]
@@ -460,6 +474,147 @@ async fn websocket_upgrade_consults_authorizer() {
     assert_eq!(resp.status(), StatusCode::SWITCHING_PROTOCOLS);
     ws.close(None).await.unwrap();
     assert_eq!(authz.envelopes().len(), 2);
+}
+
+// ── include_body ────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn include_body_sends_utf8_body_and_forwards_same_bytes() {
+    let authz = MockAuthorizer::spawn(|env| {
+        let body: Value = serde_json::from_str(env["body"].as_str().unwrap()).unwrap();
+        if body["amount"].as_u64().unwrap() <= 100 {
+            allow_with(json!({ "x-user-id": "u_1" }))
+        } else {
+            (403, vec![], "over limit".into())
+        }
+    })
+    .await;
+    let (backend, proxy) = harness(with_body(authz.addr, 1024)).await;
+    let client = https_client_http1_only();
+
+    let resp = client
+        .post(url(proxy.addr, "/api/pay"))
+        .body(r#"{"amount":50}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let calls = backend.calls();
+    assert_eq!(&calls[0].body[..], br#"{"amount":50}"#);
+    assert_eq!(calls[0].headers.get("x-user-id").unwrap(), "u_1");
+    assert_eq!(authz.envelopes()[0]["is_base64_encoded"], false);
+
+    let resp = client
+        .post(url(proxy.addr, "/api/pay"))
+        .body(r#"{"amount":500}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(resp.text().await.unwrap(), "over limit");
+    assert_eq!(
+        backend.calls().len(),
+        1,
+        "denied body must not reach backend"
+    );
+}
+
+#[tokio::test]
+async fn include_body_base64_encodes_binary() {
+    let authz = MockAuthorizer::spawn(|_| (204, vec![], String::new())).await;
+    let (backend, proxy) = harness(with_body(authz.addr, 1024)).await;
+
+    let resp = https_client_http1_only()
+        .post(url(proxy.addr, "/api/blob"))
+        .body(vec![0xffu8, 0x00, 0x10])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let env = &authz.envelopes()[0];
+    assert_eq!(env["body"], "/wAQ");
+    assert_eq!(env["is_base64_encoded"], true);
+    assert_eq!(&backend.calls()[0].body[..], &[0xff, 0x00, 0x10]);
+}
+
+#[tokio::test]
+async fn include_body_empty_body_is_empty_string() {
+    let authz = MockAuthorizer::spawn(|_| (204, vec![], String::new())).await;
+    let (_backend, proxy) = harness(with_body(authz.addr, 1024)).await;
+
+    let resp = https_client_http1_only()
+        .get(url(proxy.addr, "/api/x"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(authz.envelopes()[0]["body"], "");
+}
+
+#[tokio::test]
+async fn include_body_over_cap_by_content_length_is_413() {
+    let authz = MockAuthorizer::spawn(|_| (204, vec![], String::new())).await;
+    let (backend, proxy) = harness(with_body(authz.addr, 16)).await;
+
+    let resp = https_client_http1_only()
+        .post(url(proxy.addr, "/api/x"))
+        .body("x".repeat(17))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(authz.envelopes().is_empty());
+    assert!(backend.calls().is_empty());
+}
+
+#[tokio::test]
+async fn include_body_over_cap_chunked_is_413() {
+    let authz = MockAuthorizer::spawn(|_| (204, vec![], String::new())).await;
+    let (backend, proxy) = harness(with_body(authz.addr, 16)).await;
+
+    // A streamed body has no Content-Length, so the cap trips mid-read.
+    let chunks: Vec<Result<&'static str, std::io::Error>> =
+        vec![Ok("0123456789"), Ok("0123456789")];
+    let resp = https_client_http1_only()
+        .post(url(proxy.addr, "/api/x"))
+        .body(reqwest::Body::wrap_stream(futures::stream::iter(chunks)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(authz.envelopes().is_empty());
+    assert!(backend.calls().is_empty());
+}
+
+#[tokio::test]
+async fn include_body_respects_lower_route_max_body_bytes() {
+    let authz = MockAuthorizer::spawn(|_| (204, vec![], String::new())).await;
+    let backend = Backend::spawn("a").await;
+    let proxy = common::spawn_proxy_with_authorizers(
+        ProxySpec {
+            pools: vec![common::Backends::http("p", vec![backend.addr])],
+            routes: vec![RouteConfig {
+                path_prefix: Some("/api".to_string()),
+                authorizer: Some("internal".to_string()),
+                max_body_bytes: Some(8),
+                upstream: "p".to_string(),
+                ..Default::default()
+            }],
+        },
+        vec![],
+        vec![with_body(authz.addr, 1024)],
+    )
+    .await;
+
+    let chunks: Vec<Result<&'static str, std::io::Error>> = vec![Ok("0123456789")];
+    let resp = https_client_http1_only()
+        .post(url(proxy.addr, "/api/x"))
+        .body(reqwest::Body::wrap_stream(futures::stream::iter(chunks)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(authz.envelopes().is_empty());
 }
 
 /// A declared body over the route's `max_body_bytes` is refused before the
