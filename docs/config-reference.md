@@ -454,7 +454,7 @@ upstream    = "api"
 {
   "version": "1",
   "request_id": "6f1c…",
-  "route": "/api",
+  "route": "* */api",
   "source_ip": "203.0.113.7",
   "method": "POST",
   "host": "api.example.com",
@@ -465,6 +465,7 @@ upstream    = "api"
 }
 ```
 
+- `route` is quik's label for the route that matched: `<host> <method> <path>`, with `*` meaning any. It's the same label that appears in the access log.
 - `path` is the path the client sent, before any `strip_prefix`.
 - `query` is `null` when the request has no query string.
 - `headers` only contains the names listed in `forward_headers`, in lower case. When a header appears more than once, its values are joined with `, `.

@@ -33,7 +33,9 @@ small HTTP admin API.
   authorisers without cold starts. quik POSTs a JSON summary of the request to
   your service, uses its status to allow or deny, and injects the headers it
   returns, restricted to an allowlist
-  ([docs/config-reference.md](docs/config-reference.md#authorizers)).
+  ([docs/config-reference.md](docs/config-reference.md#authorizers)). A mock
+  authoriser is included for local testing
+  ([docs/authorizer-testing.md](docs/authorizer-testing.md)).
 - **Load balancing**: round-robin, random, or least-connections; **passive
   health** (consecutive-failure ejection with exponential backoff) plus
   optional **active health probes**.
@@ -80,6 +82,7 @@ microbenchmarks.
 | Managing pools on a running proxy     | [docs/admin-api.md](docs/admin-api.md)            |
 | Backends that self-register (NATS)    | [docs/service-registration.md](docs/service-registration.md) · [examples/nats](examples/nats) |
 | Graceful shutdown behind a perimeter  | [docs/graceful-shutdown.md](docs/graceful-shutdown.md) |
+| Trying external authorisers locally   | [docs/authorizer-testing.md](docs/authorizer-testing.md) |
 | Exposing quik outside a CDN           | [docs/hardening.md](docs/hardening.md)            |
 | The full config schema                | [docs/config-reference.md](docs/config-reference.md) |
 

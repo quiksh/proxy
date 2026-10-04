@@ -46,6 +46,7 @@ export default defineConfig({
             { slug: "docs/hardening" },
             { slug: "docs/graceful-shutdown" },
             { slug: "docs/service-registration" },
+            { slug: "docs/authorizer-testing" },
           ],
         },
         {

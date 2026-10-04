@@ -4,7 +4,7 @@ CONFIG ?= config/example.toml
 NPM ?= npm
 WEB_DIR ?= web
 
-.PHONY: help build release run test test-quiet bench fmt fmt-check lint check clippy doc clean docker docker-up docker-down audit ci web-install web-dev web-build web-preview
+.PHONY: help build release run authz-demo authz-smoke test test-quiet bench fmt fmt-check lint check clippy doc clean docker docker-up docker-down audit ci web-install web-dev web-build web-preview
 
 help: ## Show this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make \033[36m<target>\033[0m\n\nTargets:\n"} \
@@ -18,6 +18,12 @@ release: ## Optimised release build of all workspace binaries.
 
 run: ## Run quik against $(CONFIG) (default: config/example.toml).
 	$(CARGO) run --release -- --config $(CONFIG)
+
+authz-demo: ## Run quik + echo backend + mock external authorizer locally.
+	./scripts/run-authz-demo.sh
+
+authz-smoke: ## Smoke-test a running authz-demo (every allow/deny/error path).
+	./scripts/authz-smoke.sh
 
 test: ## Run the full test suite.
 	$(CARGO) test --workspace

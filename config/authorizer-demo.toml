@@ -1,0 +1,64 @@
+# quik + a mock external authorizer, all on localhost. Exercises [[authorizers]]
+# end-to-end without deploying anything. See docs/authorizer-testing.md.
+#
+#   ./scripts/gen-dev-cert.sh                                  # once
+#   BIND_ADDR=127.0.0.1:8080 cargo run --example echo_backend &
+#   AUTHZ_RULES=config/mock-authorizer.toml cargo run --example mock_authorizer &
+#   make run CONFIG=config/authorizer-demo.toml
+#
+# Or all three at once: make authz-demo
+
+mode = "edge"
+
+[listener]
+bind = "127.0.0.1:8443"
+
+[listener.tls]
+cert_path = "./tls/cert.pem"
+key_path  = "./tls/key.pem"
+
+[admin]
+bind = "127.0.0.1:9090"
+
+[logging]
+level  = "info,quik=debug"
+format = "key_value"
+
+[[upstreams]]
+name    = "echo"
+members = [{ address = "${ECHO_ADDR:-127.0.0.1:8080}" }]
+
+[[authorizers]]
+name            = "mock"
+url             = "http://${AUTHZ_ADDR:-127.0.0.1:9100}/authorize"
+timeout_ms      = 500
+# x-mock-* are the mock's control headers - forward them so a test can force
+# a status or delay per request. Drop them for a real authorizer.
+forward_headers = ["authorization", "x-api-key", "x-mock-status", "x-mock-delay-ms"]
+inject_headers  = ["x-user-id", "x-tenant-id", "x-scopes"]
+on_error        = "deny"
+
+[[authorizers]]
+name            = "mock-body"
+url             = "http://${AUTHZ_ADDR:-127.0.0.1:9100}/authorize"
+timeout_ms      = 500
+forward_headers = ["authorization", "x-api-key", "content-type"]
+inject_headers  = ["x-user-id", "x-tenant-id", "x-scopes"]
+include_body    = true
+max_body_bytes  = 16384
+
+# Payload-aware route: the authorizer sees the body.
+[[routes]]
+path_prefix = "/api/payments"
+authorizer  = "mock-body"
+upstream    = "echo"
+
+[[routes]]
+path_prefix = "/api"
+authorizer  = "mock"
+upstream    = "echo"
+
+# No authorizer - useful as a control.
+[[routes]]
+path_prefix = "/public"
+upstream    = "echo"

@@ -42,6 +42,9 @@ make run                                               # runs against config/exa
 `make run CONFIG=config/homelab.toml` to point at a different config. The CLI is
 just `quik --config <path>` - no other flags.
 
+`make authz-demo` (then `make authz-smoke` in another shell) runs quik with a
+mock external authorizer + echo backend - see `docs/authorizer-testing.md`.
+
 ## Architecture
 
 `src/lib.rs` has the authoritative module map and request-flow comment - read it
