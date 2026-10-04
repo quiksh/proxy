@@ -230,6 +230,8 @@ pub struct Upstream {
     pub bytes_sent: metrics::Counter,
     pub bytes_received: metrics::Counter,
     pub inflight_gauge: metrics::Gauge,
+    /// `quik_upstream_selected_total` for this member, bumped once per pick.
+    pub selected: metrics::Counter,
 }
 
 impl Upstream {
@@ -426,6 +428,11 @@ impl UpstreamPoolEntry {
             "pool" => self.name.clone(),
             "member" => member_label.clone(),
         );
+        let selected = metrics::counter!(
+            "quik_upstream_selected_total",
+            "pool" => self.name.clone(),
+            "member" => member_label.clone(),
+        );
         Ok(Upstream {
             name: member_label,
             address: m.address.clone(),
@@ -438,6 +445,7 @@ impl UpstreamPoolEntry {
             bytes_sent,
             bytes_received,
             inflight_gauge,
+            selected,
         })
     }
 }
@@ -509,6 +517,11 @@ fn build_pools(cfg: &Config) -> Result<HashMap<String, Arc<UpstreamPoolEntry>>> 
                 "pool" => u.name.clone(),
                 "member" => member_label.clone(),
             );
+            let selected = metrics::counter!(
+                "quik_upstream_selected_total",
+                "pool" => u.name.clone(),
+                "member" => member_label.clone(),
+            );
             members.push(Upstream {
                 name: member_label,
                 address: m.address.clone(),
@@ -521,6 +534,7 @@ fn build_pools(cfg: &Config) -> Result<HashMap<String, Arc<UpstreamPoolEntry>>> 
                 bytes_sent,
                 bytes_received,
                 inflight_gauge,
+                selected,
             });
         }
         let balancer: Box<dyn Balancer> = match u.balancer {

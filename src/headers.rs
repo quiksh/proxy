@@ -8,9 +8,11 @@
 //!   decision as the forwarding headers below); from an untrusted edge client
 //!   the inbound value is discarded and a fresh one generated, so a client
 //!   can't pin/forge the correlation id or force trace sampling. IDs are
-//!   CSPRNG-backed (`getrandom::fill`) - same cost as a non-CSPRNG on modern
-//!   OSes and removes any "what if this leaks into an authorisation context"
-//!   footgun.
+//!   CSPRNG-backed (`rand`'s thread-local ChaCha12 `ThreadRng`, seeded and
+//!   periodically reseeded from the OS) - unpredictable like OS randomness,
+//!   so there's no "what if this leaks into an authorisation context" footgun,
+//!   but with no syscall per ID (the hot path previously paid two
+//!   `getentropy`/`getrandom` syscalls per request).
 //! - **`X-Forwarded-*` injection.** Whether the inbound chain is trusted is
 //!   decided by [`ForwardedPolicy`]:
 //!   - untrusted peer (the default in [`Mode::Edge`]): inbound XFF is ignored
@@ -81,17 +83,16 @@ pub fn sanitize_upgrade_connection(headers: &mut HeaderMap) {
 // ── Random helpers (hand-rolled - see audit, replaces the `uuid` dep) ────────
 
 fn fill_random(buf: &mut [u8]) {
-    // getrandom failing means the OS RNG is broken; nothing useful to do.
-    getrandom::fill(buf).expect("OS RNG unavailable");
+    use rand::RngCore;
+    rand::rng().fill_bytes(buf);
 }
 
-fn hex_lower(buf: &[u8]) -> String {
-    let mut out = String::with_capacity(buf.len() * 2);
+/// Append `buf` as lowercase hex.
+fn push_hex(out: &mut String, buf: &[u8]) {
     for b in buf {
         out.push(nibble_to_hex(b >> 4));
         out.push(nibble_to_hex(b & 0x0f));
     }
-    out
 }
 
 fn nibble_to_hex(n: u8) -> char {
@@ -110,25 +111,33 @@ pub fn random_request_id() -> String {
     // (high two bits of byte 8) to RFC 4122 (10b).
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
-    let h = hex_lower(&b);
-    format!(
-        "{}-{}-{}-{}-{}",
-        &h[0..8],
-        &h[8..12],
-        &h[12..16],
-        &h[16..20],
-        &h[20..32]
-    )
+    // 8-4-4-4-12, written straight into one allocation.
+    let mut out = String::with_capacity(36);
+    for (i, group) in [&b[0..4], &b[4..6], &b[6..8], &b[8..10], &b[10..16]]
+        .into_iter()
+        .enumerate()
+    {
+        if i > 0 {
+            out.push('-');
+        }
+        push_hex(&mut out, group);
+    }
+    out
 }
 
 /// Generate a W3C `traceparent` header value with a fresh trace-id and
 /// parent-id, flags set to sampled (`01`).
 pub fn random_traceparent() -> String {
-    let mut trace = [0u8; 16];
-    let mut parent = [0u8; 8];
-    fill_random(&mut trace);
-    fill_random(&mut parent);
-    format!("00-{}-{}-01", hex_lower(&trace), hex_lower(&parent))
+    // trace-id (16 bytes) and parent-id (8 bytes) from one draw.
+    let mut ids = [0u8; 24];
+    fill_random(&mut ids);
+    let mut out = String::with_capacity(55);
+    out.push_str("00-");
+    push_hex(&mut out, &ids[..16]);
+    out.push('-');
+    push_hex(&mut out, &ids[16..]);
+    out.push_str("-01");
+    out
 }
 
 /// Loose syntactic check on a `traceparent`. Per W3C trace-context §3.2.2:
