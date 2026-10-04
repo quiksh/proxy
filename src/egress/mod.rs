@@ -126,7 +126,7 @@ async fn handle_request(
         None => None,
         Some(auth) => match authenticate(&req, auth).await {
             Ok(o) => Some(o),
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         },
     };
     if let Some(o) = &originator {
@@ -365,11 +365,12 @@ fn empty_body() -> EgressBody {
 
 /// Validate the `Proxy-Authorization` header and return the originator
 /// string to log against this tunnel. On failure, the returned Response
-/// is the 407 challenge / 403 reject that should go back to the client.
+/// is the 407 challenge / 403 reject that should go back to the client (boxed:
+/// `Response` is large enough to trip `clippy::result_large_err`).
 async fn authenticate(
     req: &Request<Incoming>,
     auth: &CompiledEgressAuth,
-) -> Result<String, Response<EgressBody>> {
+) -> Result<String, Box<Response<EgressBody>>> {
     let header_value = req
         .headers()
         .get("proxy-authorization")
@@ -377,7 +378,7 @@ async fn authenticate(
 
     let raw = match header_value {
         Some(s) => s,
-        None => return Err(challenge_407(auth)),
+        None => return Err(Box::new(challenge_407(auth))),
     };
 
     match auth {
@@ -388,7 +389,7 @@ async fn authenticate(
             let token = raw
                 .strip_prefix("Bearer ")
                 .or_else(|| raw.strip_prefix("bearer "))
-                .ok_or_else(|| challenge_407(auth))?;
+                .ok_or_else(|| Box::new(challenge_407(auth)))?;
             match validator.validate(token).await {
                 Ok(claims) => {
                     let originator = claims
@@ -400,7 +401,10 @@ async fn authenticate(
                 }
                 Err(e) => {
                     tracing::debug!(error = %e, "egress JWT rejected");
-                    Err(synth_short(StatusCode::FORBIDDEN, "proxy JWT rejected\n"))
+                    Err(Box::new(synth_short(
+                        StatusCode::FORBIDDEN,
+                        "proxy JWT rejected\n",
+                    )))
                 }
             }
         }
@@ -409,14 +413,16 @@ async fn authenticate(
             let encoded = raw
                 .strip_prefix("Basic ")
                 .or_else(|| raw.strip_prefix("basic "))
-                .ok_or_else(|| challenge_407(auth))?;
+                .ok_or_else(|| Box::new(challenge_407(auth)))?;
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(encoded)
-                .map_err(|_| challenge_407(auth))?;
-            let s = std::str::from_utf8(&decoded).map_err(|_| challenge_407(auth))?;
-            let (user, _pw) = s.split_once(':').ok_or_else(|| challenge_407(auth))?;
+                .map_err(|_| Box::new(challenge_407(auth)))?;
+            let s = std::str::from_utf8(&decoded).map_err(|_| Box::new(challenge_407(auth)))?;
+            let (user, _pw) = s
+                .split_once(':')
+                .ok_or_else(|| Box::new(challenge_407(auth)))?;
             if user.is_empty() {
-                return Err(challenge_407(auth));
+                return Err(Box::new(challenge_407(auth)));
             }
             // No password validation by design - the realm name documents
             // the trust posture, and the username is logged for audit.
