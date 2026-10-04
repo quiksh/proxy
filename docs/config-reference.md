@@ -435,16 +435,62 @@ upstream    = "api"
 | Field             | Type             | Default  | Notes                                                                 |
 |-------------------|------------------|----------|-----------------------------------------------------------------------|
 | `name`            | string           | required | Referenced from routes.                                               |
-| `url`             | URL              | required | `http://` or `https://`. Receives a `POST` per request.               |
-| `timeout_ms`      | u64              | `1000`   | Covers the whole call. If it expires, quik treats it as an authoriser error. |
+| `url`             | URL              | —        | `http://` or `https://`. Receives a `POST` per request. Set either `url` or `upstream`. |
+| `upstream`        | string           | —        | Name of an `[[upstreams]]` pool of authoriser instances. See [Highly available authorisers](#highly-available-authorisers). |
+| `path`            | string           | `/`      | With `upstream`: the path quik POSTs to on each member.          |
+| `retries`         | u32              | `1`      | With `upstream`: extra attempts on a *different* member after a connection error or 5xx. 0–3. A 4xx (deny) is never retried. |
+| `timeout_ms`      | u64              | `1000`   | Covers the whole call, including retries. If it expires, quik treats it as an authoriser error. |
 | `forward_headers` | array of strings | `[]`     | Inbound headers copied into the request quik sends. No headers are sent unless listed here. |
 | `inject_headers`  | array of strings | `[]`     | Headers the authoriser may set upstream. Each one is also **reserved** (see below). |
 | `include_body`    | bool             | `false`  | Read the whole request body into memory and send it in `body`. Without it, request bodies are forwarded as they arrive, without being held in memory. |
 | `max_body_bytes`  | u64              | `65536`  | Largest body accepted when `include_body` is on; bigger bodies get 413. Can't exceed 1 MiB. If the route's own `max_body_bytes` is lower, that limit applies. |
 | `body_timeout_ms` | u64              | `10000`  | With `include_body`, the time a client has to finish sending its body. A body still arriving after this gets 408. |
 | `on_error`        | `deny` \| `allow` | `deny`   | What happens when the authoriser gives no answer. `deny` returns 503; `allow` forwards the request without injected headers. |
-| `tls.ca_path`     | path             | unset    | Extra PEM CA bundle to trust, on top of the public roots.             |
-| `tls.cert_path` / `tls.key_path` | path | unset | Client certificate and key for mTLS to the authoriser. Set both or neither. |
+| `tls.ca_path`     | path             | unset    | Extra PEM CA bundle to trust, on top of the public roots. `url` only; a pool uses its own `[upstreams.tls]`. |
+| `tls.cert_path` / `tls.key_path` | path | unset | Client certificate and key for mTLS to the authoriser. Set both or neither. `url` only. |
+
+### Highly available authorisers
+
+Point the authoriser at an `[[upstreams]]` pool and quik balances requests
+across your authoriser instances itself. You don't need a separate load
+balancer or an internal proxy tier:
+
+```toml
+[[upstreams]]
+name     = "authz"
+balancer = "least_connections"
+members  = [
+    { address = "10.0.1.10:8080" },
+    { address = "10.0.2.10:8080" },
+    { address = "10.0.3.10:8080" },
+]
+[upstreams.active_health]
+enabled     = true
+path        = "/healthz"
+interval_ms = 2000
+
+[[authorizers]]
+name       = "internal"
+upstream   = "authz"
+path       = "/v1/authorize"
+retries    = 1
+timeout_ms = 250
+```
+
+The authoriser pool works like any other pool:
+- **Balancing:** requests are spread with the pool's `balancer`.
+- **Health:** passive ejection (`[upstreams.health]`) and active probes (`[upstreams.active_health]`) both apply. Failed authoriser calls count towards a member's ejection, just like failed proxied requests.
+- **Membership:** members can be added, drained and removed through the [admin API](admin-api.md), or registered through [NATS](service-registration.md). Changes take effect on the next request.
+- **TLS and HTTP version:** both come from the pool (`[upstreams.tls]`, `http_version`).
+
+**Retries.** After a connection error or 5xx, quik records the failure
+against that member and retries on another member, up to `retries` times.
+All attempts share one `timeout_ms` budget. If every member fails or none is
+eligible, `on_error` applies. A pool with a single member gets no retries,
+because there is no other member to try.
+
+A pool doesn't need to be referenced by any route, so an authoriser-only pool
+is fine.
 
 ### The request quik sends
 
@@ -506,6 +552,7 @@ rejects the overlap.
 |-------------------------------------|-----------|---------------------------|
 | `quik_authorizer_total`             | counter   | `authorizer`, `outcome` (`allow`, `deny`, `error_denied`, `error_allowed`, `spoofed_header`) |
 | `quik_authorizer_duration_seconds`  | histogram | `authorizer`              |
+| `quik_authorizer_retries_total`     | counter   | `authorizer`              |
 
 WebSocket upgrades go through `auth` and the authoriser in the same way as other requests.
 

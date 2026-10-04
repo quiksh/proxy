@@ -232,8 +232,23 @@ pub struct ClaimHeaderMapping {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuthorizerConfig {
     pub name: String,
-    /// `http://` or `https://` endpoint the envelope is POSTed to.
-    pub url: String,
+    /// `http://` or `https://` endpoint the envelope is POSTed to. Set this
+    /// *or* `upstream`, not both.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Name of an `[[upstreams]]` pool of authorizer instances. quik balances
+    /// across its members with the pool's balancer, health checks, draining,
+    /// and admin-API / NATS membership - no separate load balancer needed.
+    #[serde(default)]
+    pub upstream: Option<String>,
+    /// Request path when using `upstream` (default `/`).
+    #[serde(default)]
+    pub path: Option<String>,
+    /// With `upstream`: extra attempts on a *different* member after a
+    /// connection error or 5xx, within the same `timeout_ms` budget. 0-3,
+    /// default 1. 4xx (a deny) is never retried.
+    #[serde(default = "default_authorizer_retries")]
+    pub retries: u32,
     /// Upper bound on the whole authorizer call (connect + response body).
     /// Expiry is an authorizer error, handled per `on_error`.
     #[serde(default = "default_authorizer_timeout_ms")]
@@ -338,6 +353,13 @@ pub const AUTHORIZER_CACHE_MAX_TTL_SECONDS: u64 = 15 * 60;
 fn default_authorizer_timeout_ms() -> u64 {
     1000
 }
+
+fn default_authorizer_retries() -> u32 {
+    1
+}
+
+/// Upper bound on `[[authorizers]].retries`.
+pub const AUTHORIZER_MAX_RETRIES: u32 = 3;
 
 fn default_authorizer_max_body_bytes() -> u64 {
     64 * 1024
@@ -1225,23 +1247,55 @@ fn validate_authorizer_cache(a: &AuthorizerConfig) -> Result<()> {
     Ok(())
 }
 
-fn validate_authorizers(authorizers: &[AuthorizerConfig]) -> Result<()> {
+fn validate_authorizers(cfg: &Config) -> Result<()> {
     let mut names = HashSet::new();
-    for a in authorizers {
+    for a in &cfg.authorizers {
         if !names.insert(a.name.as_str()) {
             anyhow::bail!("duplicate authorizer name '{}'", a.name);
         }
         let ctx = || format!("authorizer '{}'", a.name);
-        let uri: http::Uri = a
-            .url
-            .parse()
-            .with_context(|| format!("{}: invalid url '{}'", ctx(), a.url))?;
-        match uri.scheme_str() {
-            Some("http") | Some("https") => {}
-            _ => anyhow::bail!("{}: url must be http:// or https://", ctx()),
+        match (&a.url, &a.upstream) {
+            (Some(url), None) => {
+                let uri: http::Uri = url
+                    .parse()
+                    .with_context(|| format!("{}: invalid url '{url}'", ctx()))?;
+                match uri.scheme_str() {
+                    Some("http") | Some("https") => {}
+                    _ => anyhow::bail!("{}: url must be http:// or https://", ctx()),
+                }
+                if uri.host().is_none() {
+                    anyhow::bail!("{}: url has no host", ctx());
+                }
+                if a.path.is_some() {
+                    anyhow::bail!("{}: path is only used with upstream (put it in url)", ctx());
+                }
+            }
+            (None, Some(pool)) => {
+                if !cfg.upstreams.iter().any(|u| &u.name == pool) {
+                    anyhow::bail!("{}: unknown upstream pool '{pool}'", ctx());
+                }
+                if let Some(p) = &a.path {
+                    let paq: http::uri::PathAndQuery = p
+                        .parse()
+                        .with_context(|| format!("{}: invalid path '{p}'", ctx()))?;
+                    if !paq.path().starts_with('/') {
+                        anyhow::bail!("{}: path must start with '/'", ctx());
+                    }
+                }
+                // Pool members use the pool's own client (and its TLS).
+                let t = &a.tls;
+                if t.ca_path.is_some() || t.cert_path.is_some() || t.key_path.is_some() {
+                    anyhow::bail!(
+                        "{}: tls is set per [[upstreams]] pool when using upstream",
+                        ctx()
+                    );
+                }
+            }
+            (Some(_), Some(_)) => anyhow::bail!("{}: set url or upstream, not both", ctx()),
+            (None, None) => anyhow::bail!("{}: one of url or upstream is required", ctx()),
         }
-        if uri.host().is_none() {
-            anyhow::bail!("{}: url has no host", ctx());
+        if a.retries > AUTHORIZER_MAX_RETRIES {
+            anyhow::bail!("{}: retries must be 0-{AUTHORIZER_MAX_RETRIES}", ctx());
         }
         if a.timeout_ms == 0 {
             anyhow::bail!("{}: timeout_ms must be > 0", ctx());
@@ -1306,7 +1360,7 @@ fn validate(cfg: &Config) -> Result<()> {
     if auth_names.len() != cfg.auth.len() {
         anyhow::bail!("duplicate auth block names");
     }
-    validate_authorizers(&cfg.authorizers)?;
+    validate_authorizers(cfg)?;
     // Fail fast on a malformed trusted-proxy entry rather than silently
     // trusting nobody at runtime (same parsing as headers::ForwardedPolicy).
     for entry in &cfg.forwarded.trusted_proxies {
@@ -1728,6 +1782,39 @@ bind = "127.0.0.1:9090"
         ] {
             let cfg: Config = toml::from_str(&authorizer_cfg(authz, route_extra)).unwrap();
             let err = validate(&cfg).unwrap_err().to_string();
+            assert!(err.contains(want), "{authz}: expected '{want}' in '{err}'");
+        }
+    }
+
+    #[test]
+    fn authorizer_upstream_target_validation() {
+        let ok: Config = toml::from_str(&authorizer_cfg(
+            "upstream=\"a\"\npath=\"/v1/authorize\"\nretries=2",
+            "",
+        ))
+        .unwrap();
+        validate(&ok).unwrap();
+        assert_eq!(ok.authorizers[0].upstream.as_deref(), Some("a"));
+
+        let default_retries: Config =
+            toml::from_str(&authorizer_cfg("upstream=\"a\"", "")).unwrap();
+        validate(&default_retries).unwrap();
+        assert_eq!(default_retries.authorizers[0].retries, 1);
+
+        for (authz, want) in [
+            ("url=\"http://x/\"\nupstream=\"a\"", "not both"),
+            ("timeout_ms=100", "one of url or upstream"),
+            ("upstream=\"nope\"", "unknown upstream pool"),
+            ("url=\"http://x/\"\npath=\"/v1\"", "only used with upstream"),
+            ("upstream=\"a\"\npath=\"v1\"", "path"),
+            (
+                "upstream=\"a\"\ntls={ca_path=\"ca.pem\"}",
+                "per [[upstreams]] pool",
+            ),
+            ("upstream=\"a\"\nretries=4", "retries must be 0-3"),
+        ] {
+            let cfg: Config = toml::from_str(&authorizer_cfg(authz, "")).unwrap();
+            let err = format!("{:#}", validate(&cfg).unwrap_err());
             assert!(err.contains(want), "{authz}: expected '{want}' in '{err}'");
         }
     }

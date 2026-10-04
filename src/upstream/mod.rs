@@ -347,6 +347,24 @@ impl Drop for InflightGuard {
     }
 }
 
+/// Record a failed request against a member's passive health, emitting the
+/// ejection metric + log when this failure crosses the threshold. Shared by
+/// the forwarding path and pooled external authorizers.
+pub fn fire_failure(health: &crate::upstream::UpstreamHealth, pool_name: &str, member_name: &str) {
+    if health.record_failure() {
+        metrics::counter!("quik_upstream_ejections_total",
+            "pool" => pool_name.to_string(),
+            "member" => member_name.to_string()
+        )
+        .increment(1);
+        tracing::warn!(
+            pool = %pool_name,
+            member = %member_name,
+            "ejecting unhealthy upstream"
+        );
+    }
+}
+
 pub struct UpstreamPoolEntry {
     /// Pool name, mirrored from the config key so admin API handlers and
     /// metric labelling can read it without a reverse lookup through the map.

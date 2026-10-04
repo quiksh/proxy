@@ -28,9 +28,16 @@ format = "key_value"
 name    = "echo"
 members = [{ address = "${ECHO_ADDR:-127.0.0.1:8080}" }]
 
+# The authorizer as a pooled upstream: add replicas here (or via the admin
+# API / NATS) and quik balances, health-checks, and retries across them.
+[[upstreams]]
+name    = "authz"
+members = [{ address = "${AUTHZ_ADDR:-127.0.0.1:9100}" }]
+
 [[authorizers]]
 name            = "mock"
-url             = "http://${AUTHZ_ADDR:-127.0.0.1:9100}/authorize"
+upstream        = "authz"
+path            = "/authorize"
 timeout_ms      = 500
 # x-mock-* are the mock's control headers - forward them so a test can force
 # a status or delay per request. Drop them for a real authorizer.

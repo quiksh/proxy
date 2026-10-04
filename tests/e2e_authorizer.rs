@@ -59,9 +59,12 @@ impl MockAuthorizer {
                         let respond = respond.clone();
                         let recorded = recorded.clone();
                         async move {
+                            let http_path = req.uri().path().to_string();
                             let body = req.into_body().collect().await.unwrap().to_bytes();
-                            let envelope: Value = serde_json::from_slice(&body).unwrap();
+                            let mut envelope: Value = serde_json::from_slice(&body).unwrap();
                             let (status, headers, body) = respond(&envelope);
+                            // Not part of the envelope: the path quik POSTed to.
+                            envelope["_http_path"] = Value::String(http_path);
                             recorded.lock().unwrap().push(envelope);
                             tokio::time::sleep(delay).await;
                             let mut resp = Response::builder().status(status);
@@ -88,7 +91,10 @@ impl MockAuthorizer {
 fn authorizer_config(addr: SocketAddr) -> AuthorizerConfig {
     AuthorizerConfig {
         name: "internal".into(),
-        url: format!("http://{addr}/authorize"),
+        url: Some(format!("http://{addr}/authorize")),
+        upstream: None,
+        path: None,
+        retries: 1,
         timeout_ms: 1000,
         forward_headers: vec!["authorization".into(), "x-api-key".into()],
         inject_headers: vec!["x-user-id".into(), "x-tenant-id".into()],
@@ -904,4 +910,149 @@ async fn cache_hit_still_rejects_spoofed_headers() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     assert_eq!(backend.calls().len(), 1);
+}
+
+// ── authorizer as a pooled upstream ─────────────────────────────────────────
+
+fn pooled(pool: &str, retries: u32) -> AuthorizerConfig {
+    AuthorizerConfig {
+        url: None,
+        upstream: Some(pool.to_string()),
+        path: Some("/v1/authorize".to_string()),
+        retries,
+        ..authorizer_config("127.0.0.1:1".parse().unwrap())
+    }
+}
+
+/// A proxy whose authorizer targets pool `authz` built from `members`.
+async fn pooled_harness(
+    members: Vec<SocketAddr>,
+    authz: AuthorizerConfig,
+    health: Option<quik::config::UpstreamHealthConfig>,
+) -> (Backend, common::ProxyHandle) {
+    let backend = Backend::spawn("a").await;
+    let mut authz_pool = common::Backends::http("authz", members);
+    if let Some(h) = health {
+        authz_pool = authz_pool.with_health(h);
+    }
+    let proxy = common::spawn_proxy_with_authorizers(
+        ProxySpec {
+            pools: vec![common::Backends::http("p", vec![backend.addr]), authz_pool],
+            routes: vec![RouteConfig {
+                path_prefix: Some("/api".to_string()),
+                authorizer: Some(authz.name.clone()),
+                upstream: "p".to_string(),
+                ..Default::default()
+            }],
+        },
+        vec![],
+        vec![authz],
+    )
+    .await;
+    (backend, proxy)
+}
+
+/// An address nothing listens on (connection refused).
+async fn dead_addr() -> SocketAddr {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    l.local_addr().unwrap()
+}
+
+#[tokio::test]
+async fn pooled_authorizer_balances_across_members() {
+    let a = MockAuthorizer::spawn(|_| allow_with(json!({ "x-user-id": "from-a" }))).await;
+    let b = MockAuthorizer::spawn(|_| allow_with(json!({ "x-user-id": "from-b" }))).await;
+    let (backend, proxy) = pooled_harness(vec![a.addr, b.addr], pooled("authz", 1), None).await;
+
+    for _ in 0..6 {
+        assert_eq!(get(&proxy, "/api/x", "t").await.status(), StatusCode::OK);
+    }
+    assert_eq!(a.envelopes().len(), 3, "round-robin across the pool");
+    assert_eq!(a.envelopes()[0]["_http_path"], "/v1/authorize");
+    assert_eq!(b.envelopes().len(), 3);
+    assert!(
+        backend
+            .calls()
+            .iter()
+            .all(|c| c.headers.get("x-user-id").is_some())
+    );
+}
+
+#[tokio::test]
+async fn pooled_authorizer_retries_5xx_on_another_member() {
+    let bad = MockAuthorizer::spawn(|_| (503, vec![], String::new())).await;
+    let good = MockAuthorizer::spawn(|_| allow_with(json!({}))).await;
+    let (_backend, proxy) =
+        pooled_harness(vec![bad.addr, good.addr], pooled("authz", 1), None).await;
+
+    for _ in 0..4 {
+        assert_eq!(get(&proxy, "/api/x", "t").await.status(), StatusCode::OK);
+    }
+    assert!(!bad.envelopes().is_empty(), "the failing member was tried");
+    assert_eq!(
+        good.envelopes().len(),
+        4,
+        "every request ended on the healthy member"
+    );
+}
+
+#[tokio::test]
+async fn pooled_authorizer_retries_connection_errors() {
+    let good = MockAuthorizer::spawn(|_| allow_with(json!({}))).await;
+    let (_backend, proxy) =
+        pooled_harness(vec![dead_addr().await, good.addr], pooled("authz", 1), None).await;
+
+    for _ in 0..4 {
+        assert_eq!(get(&proxy, "/api/x", "t").await.status(), StatusCode::OK);
+    }
+}
+
+#[tokio::test]
+async fn pooled_authorizer_without_retries_surfaces_errors() {
+    let good = MockAuthorizer::spawn(|_| allow_with(json!({}))).await;
+    let (_backend, proxy) =
+        pooled_harness(vec![dead_addr().await, good.addr], pooled("authz", 0), None).await;
+
+    let mut statuses = Vec::new();
+    for _ in 0..4 {
+        statuses.push(get(&proxy, "/api/x", "t").await.status());
+    }
+    assert!(statuses.contains(&StatusCode::SERVICE_UNAVAILABLE));
+    assert!(statuses.contains(&StatusCode::OK));
+}
+
+#[tokio::test]
+async fn pooled_authorizer_all_members_down_applies_on_error() {
+    let (backend, proxy) = pooled_harness(
+        vec![dead_addr().await, dead_addr().await],
+        pooled("authz", 3),
+        None,
+    )
+    .await;
+    assert_eq!(
+        get(&proxy, "/api/x", "t").await.status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert!(backend.calls().is_empty());
+}
+
+/// Failures count towards the pool's passive health: a member past the
+/// ejection threshold stops being picked at all.
+#[tokio::test]
+async fn pooled_authorizer_failures_eject_member() {
+    let bad = MockAuthorizer::spawn(|_| (500, vec![], String::new())).await;
+    let good = MockAuthorizer::spawn(|_| allow_with(json!({}))).await;
+    let health = quik::config::UpstreamHealthConfig {
+        ejection_threshold: 1,
+        ejection_base_ms: 60_000,
+        ejection_max_ms: 60_000,
+    };
+    let (_backend, proxy) =
+        pooled_harness(vec![bad.addr, good.addr], pooled("authz", 1), Some(health)).await;
+
+    for _ in 0..6 {
+        assert_eq!(get(&proxy, "/api/x", "t").await.status(), StatusCode::OK);
+    }
+    assert_eq!(bad.envelopes().len(), 1, "ejected after its first failure");
+    assert_eq!(good.envelopes().len(), 6);
 }
