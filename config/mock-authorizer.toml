@@ -1,0 +1,55 @@
+# Rules for examples/mock_authorizer.rs, matched top to bottom; first match
+# wins. Pairs with config/authorizer-demo.toml.
+#
+# Matchers (all that are set must match):
+#   method, path_prefix, headers = { name = "value" | "*" },
+#   claims = { claim = "value" | "*" }, bearer_prefix, body_contains
+# Outcome:
+#   status (default 200), inject = { header = "template" }, body,
+#   www_authenticate, delay_ms
+# Templates in inject: {claims.X} {header.X} {bearer_suffix} {method} {path}
+
+# Admin area needs the admin key.
+[[rules]]
+name        = "admin key"
+path_prefix = "/api/admin"
+headers     = { "x-api-key" = "admin-key" }
+inject      = { "x-user-id" = "admin", "x-scopes" = "admin,read,write" }
+
+[[rules]]
+name        = "admin without admin key"
+path_prefix = "/api/admin"
+status      = 403
+body        = '{"message":"admin key required"}'
+
+# Payments: deny large amounts by inspecting the body (route uses include_body).
+[[rules]]
+name          = "large payment"
+path_prefix   = "/api/payments"
+body_contains = '"amount":1000'
+status        = 403
+body          = '{"message":"amount over limit"}'
+
+# Regular API keys.
+[[rules]]
+name    = "dev api key"
+headers = { "x-api-key" = "dev-key" }
+inject  = { "x-user-id" = "dev-user", "x-tenant-id" = "dev-tenant", "x-scopes" = "read" }
+
+# Bearer `allow-<user>` → allowed as <user>.
+[[rules]]
+name          = "allow-<user> bearer"
+bearer_prefix = "allow-"
+inject        = { "x-user-id" = "{bearer_suffix}", "x-scopes" = "read,write" }
+
+# A deliberately slow authorizer path, for timeout testing (timeout_ms = 500).
+[[rules]]
+name        = "slow"
+path_prefix = "/api/slow"
+delay_ms    = 2000
+
+[default]
+name             = "deny"
+status           = 401
+body             = '{"message":"unauthorised"}'
+www_authenticate = 'Bearer realm="mock"'
