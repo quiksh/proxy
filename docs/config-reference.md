@@ -104,7 +104,7 @@ Defensive connection-level timeouts and HTTP/2 caps. See
 | `http2_keep_alive_interval_ms`       | u64  | `0`       | PING interval for idle h2 connections. `0` disables. |
 | `http2_keep_alive_timeout_ms`        | u64  | `20_000`  | PING response deadline; meaningful only when interval > 0. |
 | `http2_max_concurrent_streams`       | u32  | `256`     | Per-connection stream cap.                         |
-| `http2_max_concurrent_reset_streams` | usize| `64`      | Rapid-reset (CVE-2023-44487) mitigation. *Currently parsed but not yet plumbed.* |
+| `http2_max_pending_accept_reset_streams` | usize| `20`  | Rapid-reset (CVE-2023-44487) mitigation: client-reset streams awaiting acceptance before `GOAWAY`. `0` defers to hyper's default. |
 | `websocket_idle_timeout_ms`          | u64  | `300_000` | Close WS tunnels with no traffic in either direction. `0` disables. |
 
 ## `[admin]`
