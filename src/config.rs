@@ -912,6 +912,23 @@ pub struct UpstreamTlsConfig {
     /// self-signed certs in test environments. Default: false.
     #[serde(default)]
     pub skip_verify: bool,
+    /// PEM bundle of CA certificates to verify this pool's members against.
+    /// When set it *replaces* the bundled public roots - members must present
+    /// a certificate from these CAs (private PKI pinning).
+    #[serde(default)]
+    pub ca_path: Option<String>,
+    /// PEM client certificate chain quik presents to members (mTLS).
+    /// Requires `key_path`.
+    #[serde(default)]
+    pub cert_path: Option<String>,
+    /// PEM private key for `cert_path`.
+    #[serde(default)]
+    pub key_path: Option<String>,
+    /// Name to verify members' certificates against (and send as SNI) instead
+    /// of the member address - for members addressed by IP whose
+    /// certificates name a DNS host.
+    #[serde(default)]
+    pub server_name: Option<String>,
 }
 
 /// Per-pool passive health (outlier detection) tuning. The proxy ejects a
@@ -1207,6 +1224,26 @@ const AUTHORIZER_FORBIDDEN_INJECT: &[&str] = &[
     "traceparent",
 ];
 
+fn validate_upstream_tls(pool: &str, t: &UpstreamTlsConfig) -> Result<()> {
+    if t.cert_path.is_some() != t.key_path.is_some() {
+        anyhow::bail!(
+            "upstream pool '{pool}': tls.cert_path and tls.key_path must be set together"
+        );
+    }
+    if t.skip_verify && (t.ca_path.is_some() || t.server_name.is_some()) {
+        anyhow::bail!(
+            "upstream pool '{pool}': tls.skip_verify disables verification, so tls.ca_path / \
+             tls.server_name would be ignored - remove one"
+        );
+    }
+    if let Some(n) = &t.server_name {
+        rustls::pki_types::ServerName::try_from(n.as_str()).map_err(|_| {
+            anyhow::anyhow!("upstream pool '{pool}': invalid tls.server_name '{n}'")
+        })?;
+    }
+    Ok(())
+}
+
 fn validate_authorizer_cache(a: &AuthorizerConfig) -> Result<()> {
     let c = &a.cache;
     if c.ttl_seconds > AUTHORIZER_CACHE_MAX_TTL_SECONDS {
@@ -1355,6 +1392,9 @@ fn validate(cfg: &Config) -> Result<()> {
     let names: HashSet<&str> = cfg.upstreams.iter().map(|u| u.name.as_str()).collect();
     if names.len() != cfg.upstreams.len() {
         anyhow::bail!("duplicate upstream pool names");
+    }
+    for u in &cfg.upstreams {
+        validate_upstream_tls(&u.name, &u.tls)?;
     }
     let auth_names: HashSet<&str> = cfg.auth.iter().map(|a| a.name.as_str()).collect();
     if auth_names.len() != cfg.auth.len() {
@@ -1784,6 +1824,42 @@ bind = "127.0.0.1:9090"
             let err = validate(&cfg).unwrap_err().to_string();
             assert!(err.contains(want), "{authz}: expected '{want}' in '{err}'");
         }
+    }
+
+    #[test]
+    fn upstream_tls_validation() {
+        let pool = |tls: &str| {
+            format!(
+                "{MIN}\n[[upstreams]]\nname=\"a\"\nmembers=[{{address=\"127.0.0.1:1\", scheme=\"https\"}}]\n\
+                 tls={{{tls}}}\n[[routes]]\npath_prefix=\"/x\"\nupstream=\"a\"\n"
+            )
+        };
+        let ok: Config = toml::from_str(&pool(
+            "ca_path=\"ca.pem\", cert_path=\"c.pem\", key_path=\"k.pem\", server_name=\"authz.internal\"",
+        ))
+        .unwrap();
+        validate(&ok).unwrap();
+        assert_eq!(
+            ok.upstreams[0].tls.server_name.as_deref(),
+            Some("authz.internal")
+        );
+
+        for (tls, want) in [
+            ("cert_path=\"c.pem\"", "set together"),
+            ("skip_verify=true, ca_path=\"ca.pem\"", "skip_verify"),
+            ("skip_verify=true, server_name=\"x\"", "skip_verify"),
+            ("server_name=\"not a name!\"", "invalid tls.server_name"),
+        ] {
+            let cfg: Config = toml::from_str(&pool(tls)).unwrap();
+            let err = format!("{:#}", validate(&cfg).unwrap_err());
+            assert!(err.contains(want), "{tls}: expected '{want}' in '{err}'");
+        }
+        // skip_verify with a client cert is allowed (mTLS without server checks).
+        let cfg: Config = toml::from_str(&pool(
+            "skip_verify=true, cert_path=\"c.pem\", key_path=\"k.pem\"",
+        ))
+        .unwrap();
+        validate(&cfg).unwrap();
     }
 
     #[test]

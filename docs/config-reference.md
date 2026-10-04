@@ -265,7 +265,48 @@ timeout_ms = 60000
 
 | Field         | Type   | Default | Notes                                                                            |
 |---------------|--------|---------|----------------------------------------------------------------------------------|
-| `skip_verify` | bool   | `false` | **Danger:** bypass cert verification. OK for trusted internal nets / homelab. |
+| `skip_verify` | bool   | `false` | **Danger:** turns off certificate checks. Only for trusted internal networks or a homelab. Can't be combined with `ca_path` or `server_name`. |
+| `ca_path`     | path   | unset   | PEM bundle of CAs to verify members against. It **replaces** the public roots, so only certificates from these CAs are accepted (pinning to your private CA). |
+| `cert_path` / `key_path` | path | unset | Client certificate and key that quik presents to members (mTLS). Set both or neither. |
+| `server_name` | string | unset   | Name to verify members' certificates against, sent as SNI, instead of the member address. Use it when members are addressed by IP but certificates name a DNS host. |
+
+These settings also apply to the pool's active health probes and to
+[pooled authorisers](#highly-available-authorisers). For mutual TLS, set
+`ca_path` plus `cert_path`/`key_path` here, and configure the members to
+require client certificates from the same CA:
+
+```toml
+[[upstreams]]
+name    = "authz"
+members = [{ address = "10.0.1.10:8443", scheme = "https" },
+           { address = "10.0.2.10:8443", scheme = "https" }]
+[upstreams.tls]
+ca_path     = "/etc/quik/internal-ca.pem"
+cert_path   = "/etc/quik/quik-client.pem"
+key_path    = "/etc/quik/quik-client.key"
+server_name = "authz.internal"
+```
+
+Certificate files are read once at startup. Pool TLS settings can't be hot
+reloaded, so **rotating certificates requires a restart**.
+
+**Cost.** quik reuses pooled connections, so TLS and mTLS only pay the
+handshake cost when a connection is opened. `scripts/bench-authz-tls.sh`
+measures this. On an Apple Silicon laptop, with every component on one
+machine:
+
+| Authoriser hop | Connections reused (normal) | New connection per call (worst case) |
+|----------------|-----------------------------|--------------------------------------|
+| plain HTTP     | ~14–15k RPS                 | ~5k RPS                              |
+| TLS            | ~14.6–14.8k RPS, same CPU   | ~3.9k RPS, ~2.5–3× authoriser CPU     |
+| mTLS           | ~14.6k RPS, same CPU        | ~3.8–3.9k RPS, similar to TLS         |
+
+With reused connections, the difference is within run-to-run noise. Handshake
+cost only matters when connections are created often, for example when
+members close idle connections quickly, or when every client reconnects after
+a deploy. These RPS figures reflect the benchmark machine, where the load
+generator, quik and both servers share its cores. Use them to compare the
+rows, not as quik's throughput limit.
 
 ### `[upstreams.health]` (passive)
 
