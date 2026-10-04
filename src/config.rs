@@ -260,6 +260,11 @@ pub struct AuthorizerConfig {
     /// own `max_body_bytes`, when lower, also applies.
     #[serde(default = "default_authorizer_max_body_bytes")]
     pub max_body_bytes: u64,
+    /// Deadline for reading the whole body when `include_body` is set. A
+    /// client that hasn't finished sending by then gets 408, so a slow upload
+    /// can't pin a buffer indefinitely.
+    #[serde(default = "default_authorizer_body_timeout_ms")]
+    pub body_timeout_ms: u64,
     #[serde(default)]
     pub tls: AuthorizerTlsConfig,
 }
@@ -270,6 +275,10 @@ fn default_authorizer_timeout_ms() -> u64 {
 
 fn default_authorizer_max_body_bytes() -> u64 {
     64 * 1024
+}
+
+fn default_authorizer_body_timeout_ms() -> u64 {
+    10_000
 }
 
 /// Hard ceiling on `[[authorizers]].max_body_bytes`: every in-flight request on
@@ -1155,6 +1164,9 @@ fn validate_authorizers(authorizers: &[AuthorizerConfig]) -> Result<()> {
                 "{}: max_body_bytes must be between 1 and {AUTHORIZER_MAX_BODY_CEILING}",
                 ctx()
             );
+        }
+        if a.include_body && a.body_timeout_ms == 0 {
+            anyhow::bail!("{}: body_timeout_ms must be > 0", ctx());
         }
         if a.tls.cert_path.is_some() != a.tls.key_path.is_some() {
             anyhow::bail!(

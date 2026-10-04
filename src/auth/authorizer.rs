@@ -85,6 +85,7 @@ pub struct HttpAuthorizer {
     pub on_error: AuthorizerOnError,
     /// `Some(cap)` when the request body is sent (`include_body`).
     body_limit: Option<u64>,
+    body_timeout: Duration,
     uri: Uri,
     timeout: Duration,
     forward_headers: Vec<HeaderName>,
@@ -156,6 +157,7 @@ impl HttpAuthorizer {
             metrics: AuthorizerMetrics::new(&cfg.name),
             on_error: cfg.on_error,
             body_limit: cfg.include_body.then_some(cfg.max_body_bytes),
+            body_timeout: Duration::from_millis(cfg.body_timeout_ms),
             uri: cfg.url.parse().context("parsing authorizer url")?,
             timeout: Duration::from_millis(cfg.timeout_ms),
             forward_headers: parse_names(&cfg.forward_headers)?,
@@ -168,6 +170,11 @@ impl HttpAuthorizer {
     /// (the body streams to the upstream untouched).
     pub fn body_limit(&self) -> Option<u64> {
         self.body_limit
+    }
+
+    /// Deadline for buffering the request body (`body_timeout_ms`).
+    pub fn body_timeout(&self) -> Duration {
+        self.body_timeout
     }
 
     /// SECURITY: the first `inject_headers` name present on the inbound
@@ -254,10 +261,13 @@ impl HttpAuthorizer {
             .get(http::header::HOST)
             .and_then(|h| h.to_str().ok())
             .or_else(|| req.uri.authority().map(|a| a.as_str()));
+        // Text goes verbatim; anything else - invalid UTF-8, or control
+        // characters JSON would escape as 6-byte `\u00XX` - is base64, so the
+        // envelope stays within ~4/3 of max_body_bytes.
         let (body, is_base64_encoded) = match req.body {
             Some(b) => match std::str::from_utf8(b) {
-                Ok(s) => (Some(Cow::Borrowed(s)), Some(false)),
-                Err(_) => (Some(Cow::Owned(BASE64.encode(b))), Some(true)),
+                Ok(s) if !has_escaped_controls(b) => (Some(Cow::Borrowed(s)), Some(false)),
+                _ => (Some(Cow::Owned(BASE64.encode(b))), Some(true)),
             },
             None => (None, None),
         };
@@ -312,6 +322,13 @@ impl HttpAuthorizer {
     }
 }
 
+/// Whether `b` has bytes JSON would escape as `\u00XX` (C0 controls other than
+/// tab / LF / CR, which get short escapes, plus DEL).
+fn has_escaped_controls(b: &[u8]) -> bool {
+    b.iter()
+        .any(|&c| (c < 0x20 && !matches!(c, b'\t' | b'\n' | b'\r')) || c == 0x7f)
+}
+
 async fn read_capped<B>(body: B) -> Result<Bytes>
 where
     B: hyper::body::Body<Data = Bytes>,
@@ -338,6 +355,7 @@ mod tests {
             on_error: AuthorizerOnError::Deny,
             include_body: false,
             max_body_bytes: 1024,
+            body_timeout_ms: 1000,
             tls: Default::default(),
         };
         HttpAuthorizer::build(&cfg, super::super::client::build_jwks_client_skip_verify()).unwrap()
@@ -451,5 +469,12 @@ mod tests {
         let v = encode(&Bytes::from_static(&[0xff, 0x00, 0x10]));
         assert_eq!(v["body"], "/wAQ");
         assert_eq!(v["is_base64_encoded"], true);
+        // Valid UTF-8 but NUL-heavy: base64 rather than 6x `\u0000` escapes.
+        let v = encode(&Bytes::from_static(b"a\x00b"));
+        assert_eq!(v["is_base64_encoded"], true);
+        // Ordinary text with newlines/tabs stays verbatim.
+        let v = encode(&Bytes::from_static(b"line1\n\tline2\r\n"));
+        assert_eq!(v["body"], "line1\n\tline2\r\n");
+        assert_eq!(v["is_base64_encoded"], false);
     }
 }

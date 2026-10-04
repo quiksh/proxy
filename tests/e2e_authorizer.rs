@@ -95,6 +95,7 @@ fn authorizer_config(addr: SocketAddr) -> AuthorizerConfig {
         on_error: AuthorizerOnError::Deny,
         include_body: false,
         max_body_bytes: 64 * 1024,
+        body_timeout_ms: 10_000,
         tls: Default::default(),
     }
 }
@@ -647,4 +648,34 @@ async fn oversized_content_length_skips_authorizer() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     assert!(authz.envelopes().is_empty());
+}
+
+/// A client that never finishes sending its body gets 408 instead of holding
+/// a buffer open indefinitely.
+#[tokio::test]
+async fn include_body_slow_sender_times_out() {
+    let authz = MockAuthorizer::spawn(|_| (204, vec![], String::new())).await;
+    let mut cfg = with_body(authz.addr, 1024);
+    cfg.body_timeout_ms = 100;
+    let (backend, proxy) = harness(cfg).await;
+
+    // First chunk arrives, then the stream stalls well past the deadline.
+    let stream = futures::stream::unfold(0u8, |n| async move {
+        match n {
+            0 => Some((Ok::<_, std::io::Error>("partial"), 1)),
+            _ => {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                None
+            }
+        }
+    });
+    let resp = https_client_http1_only()
+        .post(url(proxy.addr, "/api/x"))
+        .body(reqwest::Body::wrap_stream(stream))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::REQUEST_TIMEOUT);
+    assert!(authz.envelopes().is_empty());
+    assert!(backend.calls().is_empty());
 }

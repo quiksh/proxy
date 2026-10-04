@@ -1192,7 +1192,9 @@ async fn apply_route_authorizer(
         Some(cap) => {
             // The route's own cap still applies to the buffered body.
             let cap = ctx.max_body_bytes.map_or(cap, |route| cap.min(route));
-            InboundBody::Buffered(buffer_body(&head.headers, body, cap, ctx).await?)
+            InboundBody::Buffered(
+                buffer_body(&head.headers, body, cap, authz.body_timeout(), ctx).await?,
+            )
         }
         None => InboundBody::Streaming(body),
     };
@@ -1251,11 +1253,17 @@ async fn apply_route_authorizer(
 
 /// Read the whole request body for an authorizer, up to `cap` bytes. A declared
 /// `Content-Length` over the cap is rejected before reading; a chunked body
-/// that grows past it is rejected mid-read. Either way the client gets 413.
+/// that grows past it is rejected mid-read. Either way the client gets 413. A
+/// body not fully received within `deadline` gets 408, so a slow sender can't
+/// hold a buffer open indefinitely.
+///
+/// Request trailers are not preserved: the buffered body is forwarded as one
+/// data frame (documented under `include_body`).
 async fn buffer_body(
     headers: &HeaderMap,
     body: Incoming,
     cap: u64,
+    deadline: Duration,
     ctx: &AuthCtx<'_>,
 ) -> Result<Bytes, Rejection> {
     let too_large = || {
@@ -1271,7 +1279,17 @@ async fn buffer_body(
     {
         return Err(too_large());
     }
-    match Limited::new(body, cap as usize).collect().await {
+    let Ok(collected) =
+        tokio::time::timeout(deadline, Limited::new(body, cap as usize).collect()).await
+    else {
+        metrics::counter!("quik_proxy_errors_total", "kind" => "body_timeout").increment(1);
+        record_terminal(ctx.route_label, 408, ctx.start, None);
+        return Err(Box::new(synth(
+            StatusCode::REQUEST_TIMEOUT,
+            "request body timeout\n",
+        )));
+    };
+    match collected {
         Ok(c) => Ok(c.to_bytes()),
         Err(e) if e.is::<http_body_util::LengthLimitError>() => Err(too_large()),
         Err(e) => {
