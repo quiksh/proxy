@@ -679,3 +679,55 @@ async fn include_body_slow_sender_times_out() {
     assert!(authz.envelopes().is_empty());
     assert!(backend.calls().is_empty());
 }
+
+/// An upgrade request has no body; buffering it for an `include_body`
+/// authorizer must complete immediately (empty) rather than stall the
+/// handshake, and the upgrade must still succeed.
+#[tokio::test]
+async fn websocket_upgrade_with_include_body_authorizer() {
+    use tokio_tungstenite::Connector;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let authz = MockAuthorizer::spawn(|_| (204, vec![], String::new())).await;
+    let backend = Backend::spawn_ws_echo("ws").await;
+    let proxy = common::spawn_proxy_with_authorizers(
+        ProxySpec {
+            pools: vec![common::Backends::http("p", vec![backend.addr])],
+            routes: vec![RouteConfig {
+                path_prefix: Some("/".to_string()),
+                authorizer: Some("internal".to_string()),
+                upstream: "p".to_string(),
+                ..Default::default()
+            }],
+        },
+        vec![],
+        vec![with_body(authz.addr, 1024)],
+    )
+    .await;
+
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let mut tls = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(common::TestNoVerifier))
+        .with_no_client_auth();
+    tls.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let req = format!("wss://localhost:{}/echo", proxy.addr.port())
+        .into_client_request()
+        .unwrap();
+
+    let (mut ws, resp) = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio_tungstenite::connect_async_tls_with_config(
+            req,
+            None,
+            false,
+            Some(Connector::Rustls(Arc::new(tls))),
+        ),
+    )
+    .await
+    .expect("upgrade must not stall on body buffering")
+    .expect("ws connect");
+    assert_eq!(resp.status(), StatusCode::SWITCHING_PROTOCOLS);
+    ws.close(None).await.unwrap();
+    assert_eq!(authz.envelopes()[0]["body"], "");
+}
