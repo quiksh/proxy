@@ -48,7 +48,8 @@ use crate::auth::{AuthError, SharedAuthRegistry, extract_bearer_token};
 use crate::config::Mode;
 use crate::headers::{
     SharedForwardedPolicy, apply_forwarded, apply_forwarded_for, apply_forwarded_host,
-    apply_forwarded_proto, ensure_request_id, ensure_traceparent, strip_hop_by_hop,
+    apply_forwarded_proto, ensure_request_id, ensure_traceparent, sanitize_upgrade_connection,
+    strip_hop_by_hop,
 };
 use crate::routing::SharedRoutingTable;
 use crate::shutdown::Coordinator;
@@ -310,6 +311,12 @@ async fn forward_inner(
 
     let (mut parts, body) = req.into_parts();
 
+    // SECURITY: drop hop-by-hop headers (including any the client names in
+    // `Connection`) before anything is injected. Stripping later would let a
+    // client send `Connection: x-auth-sub` and have quik remove its own
+    // injected identity header (or the request-id) before forwarding.
+    strip_hop_by_hop(&mut parts.headers);
+
     // Whether we trust the immediate peer to have set forwarding / identity
     // headers (host mode, or edge + a trusted_proxies match). Computed up front
     // because the request-id stamp below depends on it; the two bools are read
@@ -363,7 +370,7 @@ async fn forward_inner(
         && let Err(resp) =
             apply_route_auth(auth, name, &mut parts.headers, &route_label, start).await
     {
-        return resp;
+        return *resp;
     }
 
     // ── max_body_bytes module ────────────────────────────────────────────────
@@ -458,7 +465,7 @@ async fn forward_inner(
         crate::config::UpstreamHttpVersion::H1 => http::Version::HTTP_11,
         crate::config::UpstreamHttpVersion::H2 => http::Version::HTTP_2,
     };
-    strip_hop_by_hop(&mut parts.headers);
+    // Hop-by-hop headers were stripped on entry, before auth injection.
     parts.headers.remove(HOST);
     // By default the upstream sees its own address as `Host` (hyper derives it
     // from the request URI authority, which we set to the target above). With
@@ -806,6 +813,11 @@ async fn handle_ws_upgrade(
         (fp.trusts(peer_ip, ctx.mode), fp.emit)
     };
 
+    // SECURITY: same reasoning as the strip in forward_inner - a client must
+    // not be able to nominate injected headers as hop-by-hop. Upgrades keep
+    // `Connection: upgrade` so the handshake still works.
+    sanitize_upgrade_connection(req.headers_mut());
+
     // Mirror forward_inner: stamp the request_id onto the parent "req" span
     // so even early-return paths (no-route etc.) get the correlation key in
     // the access log.
@@ -843,7 +855,7 @@ async fn handle_ws_upgrade(
         && let Err(resp) =
             apply_route_auth(auth, name, req.headers_mut(), &route_label, start).await
     {
-        return resp;
+        return *resp;
     }
 
     let pool = match upstreams.get(&pool_name) {
@@ -1040,21 +1052,26 @@ async fn handle_ws_upgrade(
 /// terminal access-log line and returns the response to send. Shared by the
 /// plain forwarding path and the WebSocket upgrade path so an `Upgrade` request
 /// can't bypass route auth.
+/// An early response produced by a request-stage module (auth, authorizer).
+/// Boxed because `Response` is large enough to trip `clippy::result_large_err`
+/// on every `Result` carrying it.
+type Rejection = Box<Response<ProxyBody>>;
+
 async fn apply_route_auth(
     auth: &SharedAuthRegistry,
     name: &str,
     headers: &mut HeaderMap,
     route_label: &Arc<str>,
     start: Instant,
-) -> Result<(), Response<ProxyBody>> {
+) -> Result<(), Rejection> {
     let Some(validator) = auth.get(name) else {
         tracing::error!(auth = %name, "route references missing auth - config drift");
         metrics::counter!("quik_proxy_errors_total", "kind" => "auth_misconfig").increment(1);
         record_terminal(route_label, 500, start, None);
-        return Err(synth(
+        return Err(Box::new(synth(
             StatusCode::INTERNAL_SERVER_ERROR,
             "auth misconfigured\n",
-        ));
+        )));
     };
     // Take an owned copy of the token so the immutable borrow on headers
     // doesn't outlive the call - validate_and_inject needs a mutable borrow on
@@ -1062,7 +1079,7 @@ async fn apply_route_auth(
     let Some(token) = extract_bearer_token(headers).map(|t| t.to_owned()) else {
         metrics::counter!("quik_auth_total", "auth" => name.to_owned(), "outcome" => "missing_token").increment(1);
         record_terminal(route_label, 401, start, None);
-        return Err(unauthorized("missing bearer token"));
+        return Err(Box::new(unauthorized("missing bearer token")));
     };
     match validator.validate_and_inject(&token, headers).await {
         Ok(()) => {
@@ -1091,7 +1108,7 @@ async fn apply_route_auth(
                 _ => StatusCode::UNAUTHORIZED,
             };
             record_terminal(route_label, status.as_u16(), start, None);
-            Err(unauthorized_with_status(status, "auth rejected"))
+            Err(Box::new(unauthorized_with_status(status, "auth rejected")))
         }
     }
 }
