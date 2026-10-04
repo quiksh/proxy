@@ -1047,16 +1047,16 @@ async fn handle_ws_upgrade(
     Response::from_parts(parts, into_proxy_body(body))
 }
 
-/// Run the route's `[[auth]]` block against the inbound headers: validate the
-/// bearer token and write any claim-mapped headers. On rejection, records the
-/// terminal access-log line and returns the response to send. Shared by the
-/// plain forwarding path and the WebSocket upgrade path so an `Upgrade` request
-/// can't bypass route auth.
 /// An early response produced by a request-stage module (auth, authorizer).
 /// Boxed because `Response` is large enough to trip `clippy::result_large_err`
 /// on every `Result` carrying it.
 type Rejection = Box<Response<ProxyBody>>;
 
+/// Run the route's `[[auth]]` block against the inbound headers: validate the
+/// bearer token and write any claim-mapped headers. On rejection, records the
+/// terminal access-log line and returns the response to send. Shared by the
+/// plain forwarding path and the WebSocket upgrade path so an `Upgrade` request
+/// can't bypass route auth.
 async fn apply_route_auth(
     auth: &SharedAuthRegistry,
     name: &str,
