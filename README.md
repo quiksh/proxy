@@ -25,15 +25,21 @@ small HTTP admin API.
 - **WebSockets**, **SSE**, **gRPC trailers** all forwarded transparently.
 - **Routing** by host, method, exact path, or segment-aware prefix -
   most-specific match wins.
-- **Per-route modules**: timeout, max body size, prefix stripping, JWT auth.
+- **Per-route modules**: timeout, max body size, prefix stripping, JWT auth,
+  external authoriser.
 - **JWT authentication** with JWKS auto-refresh on `kid` miss; verified
   claims project into upstream-bound headers.
+- **External HTTP authorisers**: an alternative to API Gateway Lambda
+  authorisers without cold starts. quik POSTs a JSON summary of the request to
+  your service, uses its status to allow or deny, and injects the headers it
+  returns, restricted to an allowlist
+  ([docs/config-reference.md](docs/config-reference.md#authorizers)).
 - **Load balancing**: round-robin, random, or least-connections; **passive
   health** (consecutive-failure ejection with exponential backoff) plus
   optional **active health probes**.
 - **Online member management** via a separate admin listener: add, drain,
   undrain, or remove members without restarting.
-- **Hot config reload** of routes, `[[auth]]` blocks, and the `[forwarded]`
+- **Hot config reload** of routes, `[[auth]]` and `[[authorizers]]` blocks, and the `[forwarded]`
   policy - via `SIGHUP` or `POST /admin/config/reload`. All-or-nothing and
   fail-safe: a bad or restart-only change is rejected and the running config
   keeps serving ([docs/admin-api.md](docs/admin-api.md#config-reload)).
@@ -146,7 +152,7 @@ src/                    proxy core
   routing/              route table - exact > prefix, longest-prefix-first
   upstream/             pools, balancers, passive + active health, drain
     nats/               NATS registration watcher (feature `nats`)
-  auth/                 JWT validation, JWKS cache, claim injection
+  auth/                 JWT validation, JWKS cache, claim injection, HTTP authorizer
   admin/                admin listener + /admin/pools API
   egress/               optional HTTP CONNECT forward proxy
   observability/        tracing init + Prometheus exporter

@@ -11,7 +11,8 @@
 //!   [`upstream::state`] (lifecycle + active health), [`upstream::probe`]
 //!   (per-pool active health task), [`upstream::drain`] (graceful removal).
 //! - [`auth`]: per-route JWT validation with JWKS cache + claim-to-header
-//!   injection. Reserved-header protection prevents client spoofing.
+//!   injection, and external HTTP authorizers (allow/deny + header injection).
+//!   Reserved-header protection prevents client spoofing.
 //! - [`headers`]: hop-by-hop stripping + identity-header generation
 //!   (`request-id`, `traceparent`, `X-Forwarded-*`). CSPRNG-backed IDs.
 //! - [`shutdown`]: SIGTERM/SIGINT drain with double-signal force exit.

@@ -164,15 +164,16 @@ impl AuthValidator {
 
     /// Validate the bearer token, then write any configured claim-to-header
     /// mappings into `headers`. Headers reserved by `inject_headers` are
-    /// always removed first so clients cannot spoof them.
+    /// always removed first so clients cannot spoof them. Returns the verified
+    /// claims (forwarded to an external authorizer when the route has one).
     pub async fn validate_and_inject(
         &self,
         token: &str,
         headers: &mut HeaderMap,
-    ) -> Result<(), AuthError> {
+    ) -> Result<Claims, AuthError> {
         let claims = self.validate(token).await?;
         self.apply_injector(headers, &claims)?;
-        Ok(())
+        Ok(claims)
     }
 
     fn apply_injector(&self, headers: &mut HeaderMap, claims: &Claims) -> Result<(), AuthError> {

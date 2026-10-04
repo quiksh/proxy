@@ -130,6 +130,8 @@ pub struct RouteEntry {
     pub upstream_pool: String,
     /// Optional auth block name. None = route is anonymous.
     pub auth: Option<String>,
+    /// Optional `[[authorizers]]` name. None = no external authorizer.
+    pub authorizer: Option<String>,
     pub label: Arc<str>,
 }
 
@@ -255,6 +257,7 @@ fn build_table(routes: &[RouteConfig]) -> Result<RoutingTable> {
             modules,
             upstream_pool: r.upstream.clone(),
             auth: r.auth.clone(),
+            authorizer: r.authorizer.clone(),
             label,
         });
     }
@@ -337,6 +340,7 @@ mod tests {
             timeout_ms: None,
             max_body_bytes: None,
             auth: None,
+            authorizer: None,
             preserve_host: false,
             upstream: r.up.to_owned(),
         }

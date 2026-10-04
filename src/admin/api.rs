@@ -206,6 +206,7 @@ struct ReloadResponse {
     path: String,
     routes: usize,
     auth_blocks: usize,
+    authorizers: usize,
 }
 
 /// `POST /admin/config/reload` - re-read the config file and hot-swap the
@@ -243,6 +244,7 @@ async fn reload_config(
                     path: handle.path().display().to_string(),
                     routes: outcome.routes,
                     auth_blocks: outcome.auth_blocks,
+                    authorizers: outcome.authorizers,
                 },
             )
         }

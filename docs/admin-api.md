@@ -99,10 +99,12 @@ the command line) and hot-swaps the sections that can change without rebinding
 a socket or rebuilding a TLS acceptor:
 
 - **routes** - add, remove, or retune routes and their modules (`strip_prefix`,
-  `timeout_ms`, `max_body_bytes`, `auth`).
+  `timeout_ms`, `max_body_bytes`, `auth`, `authorizer`).
 - **`[[auth]]` blocks** - JWKS URLs, issuer/audience, allowed algorithms,
   injected headers. (A reloaded block starts with an empty JWKS cache, so the
   first request per `kid` re-fetches.)
+- **`[[authorizers]]` blocks**: URL, timeout, header lists, `on_error`, TLS.
+  A reloaded authoriser gets a new connection pool.
 - **`[forwarded]`** - trusted-proxy CIDRs and the RFC 7239 `Forwarded` emit
   toggle.
 
@@ -129,7 +131,7 @@ section changed, the running config is left completely untouched:
 
 | Result                                   | Status | Notes                                              |
 |------------------------------------------|--------|----------------------------------------------------|
-| Applied                                  | `200`  | Body: `{ "status": "reloaded", "routes": N, "auth_blocks": M, "path": "..." }` |
+| Applied                                  | `200`  | Body: `{ "status": "reloaded", "routes": N, "auth_blocks": M, "authorizers": K, "path": "..." }` |
 | A non-reloadable section changed         | `409`  | Body names the offending section. Nothing applied. |
 | File missing / bad TOML / failed validation | `400` | Nothing applied.                                   |
 | Reload not wired into this process       | `501`  | Only when built/embedded without a reload handle.  |
@@ -139,7 +141,7 @@ ADMIN=http://127.0.0.1:9090
 
 # Edit the config file, then:
 curl -s -X POST "$ADMIN/admin/config/reload" | jq
-# { "status": "reloaded", "path": "/etc/quik/quik.toml", "routes": 4, "auth_blocks": 1 }
+# { "status": "reloaded", "path": "/etc/quik/quik.toml", "routes": 4, "auth_blocks": 1, "authorizers": 1 }
 
 # Or via signal:
 kill -HUP "$(pgrep quik)"
