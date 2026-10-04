@@ -1,8 +1,5 @@
-//! Per-route JWT authentication.
+//! JWT validation against a JWKS-backed key cache.
 //!
-//! Architecture
-//! - [`AuthRegistry`] holds named [`AuthValidator`] instances, one per `[[auth]]`
-//!   block in config. Looked up by name from the route's `auth = "..."` field.
 //! - [`AuthValidator`] knows its issuer, audience, allowed algorithms, and which
 //!   [`JwksCache`] to ask for signing keys.
 //! - [`JwksCache`] holds a swap-able map of `kid -> DecodingKey`. On a kid miss
@@ -22,16 +19,11 @@ use arc_swap::ArcSwap;
 use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, Request};
 use http_body_util::{BodyExt, Empty};
-use hyper_rustls::HttpsConnectorBuilder;
-use hyper_util::client::legacy::Client;
-use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::rt::TokioExecutor;
 use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, DecodingKey, TokenData, Validation, decode, decode_header};
-use rustls::ClientConfig;
 use tokio::sync::Mutex;
 
-use crate::config::{AuthBlockConfig, ClaimHeaderMapping, Config};
+use crate::config::{AuthBlockConfig, ClaimHeaderMapping};
 use crate::upstream::{ProxyBody, ProxyClient, into_proxy_body};
 
 #[derive(Debug)]
@@ -71,93 +63,6 @@ impl std::error::Error for AuthError {}
 
 pub type Claims = serde_json::Value;
 
-pub struct AuthRegistry {
-    validators: HashMap<String, Arc<AuthValidator>>,
-}
-
-impl AuthRegistry {
-    pub fn empty() -> Self {
-        Self {
-            validators: HashMap::new(),
-        }
-    }
-
-    pub fn from_config(cfg: &Config) -> Result<Self> {
-        let client = build_jwks_client();
-        Self::build_with_client(cfg, client)
-    }
-
-    /// Test-only variant that builds JWKS clients with certificate
-    /// verification disabled. Used by the integration test harness which
-    /// spawns its own self-signed (or plain-HTTP) JWKS server.
-    #[doc(hidden)]
-    pub fn from_config_for_tests(cfg: &Config) -> Result<Self> {
-        let client = build_jwks_client_skip_verify();
-        Self::build_with_client(cfg, client)
-    }
-
-    fn build_with_client(cfg: &Config, client: ProxyClient) -> Result<Self> {
-        let mut validators = HashMap::with_capacity(cfg.auth.len());
-        for a in &cfg.auth {
-            let v = AuthValidator::build(a, client.clone())
-                .with_context(|| format!("building auth '{}'", a.name))?;
-            validators.insert(a.name.clone(), Arc::new(v));
-        }
-        Ok(Self { validators })
-    }
-
-    pub fn get(&self, name: &str) -> Option<Arc<AuthValidator>> {
-        self.validators.get(name).cloned()
-    }
-}
-
-/// An [`AuthRegistry`] behind an [`ArcSwap`] so a config reload can replace the
-/// set of `[[auth]]` validators atomically. Readers (the proxy hot path) take a
-/// single lock-free load per lookup. Mirrors
-/// [`crate::routing::SharedRoutingTable`].
-///
-/// A swapped-in registry carries fresh, empty [`JwksCache`]s: the first request
-/// per `kid` after a reload re-fetches the JWKS. In-flight validations holding
-/// an `Arc<AuthValidator>` from the previous registry complete unaffected.
-pub struct SharedAuthRegistry {
-    inner: ArcSwap<AuthRegistry>,
-}
-
-impl SharedAuthRegistry {
-    pub fn new(registry: AuthRegistry) -> Self {
-        Self {
-            inner: ArcSwap::from_pointee(registry),
-        }
-    }
-
-    pub fn from_config(cfg: &Config) -> Result<Self> {
-        Ok(Self::new(AuthRegistry::from_config(cfg)?))
-    }
-
-    /// Test-only: build validators whose JWKS clients skip certificate
-    /// verification. See [`AuthRegistry::from_config_for_tests`].
-    #[doc(hidden)]
-    pub fn from_config_for_tests(cfg: &Config) -> Result<Self> {
-        Ok(Self::new(AuthRegistry::from_config_for_tests(cfg)?))
-    }
-
-    /// Resolve a validator by name (single lock-free load + Arc clone).
-    pub fn get(&self, name: &str) -> Option<Arc<AuthValidator>> {
-        self.inner.load().get(name)
-    }
-
-    /// Borrow the current registry as an `Arc`. Used at startup to seed the
-    /// egress policy, which holds its own boot-time validator clones.
-    pub fn snapshot(&self) -> Arc<AuthRegistry> {
-        self.inner.load_full()
-    }
-
-    /// Atomically replace the registry. Called by the config-reload path.
-    pub fn swap(&self, registry: AuthRegistry) {
-        self.inner.store(Arc::new(registry));
-    }
-}
-
 struct CompiledMapping {
     claim: String,
     header: HeaderName,
@@ -175,7 +80,7 @@ pub struct AuthValidator {
 }
 
 impl AuthValidator {
-    fn build(cfg: &AuthBlockConfig, client: ProxyClient) -> Result<Self> {
+    pub(super) fn build(cfg: &AuthBlockConfig, client: ProxyClient) -> Result<Self> {
         let algorithms = if cfg.algorithms.is_empty() {
             vec![Algorithm::RS256, Algorithm::ES256, Algorithm::EdDSA]
         } else {
@@ -510,104 +415,6 @@ async fn fetch_jwks(client: &ProxyClient, url: &str) -> Result<HashMap<String, D
         }
     }
     Ok(out)
-}
-
-fn build_jwks_client() -> ProxyClient {
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let tls_config = ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    let mut http = HttpConnector::new();
-    http.enforce_http(false);
-    let https = HttpsConnectorBuilder::new()
-        .with_tls_config(tls_config)
-        .https_or_http()
-        .enable_http1()
-        .enable_http2()
-        .wrap_connector(http);
-    Client::builder(TokioExecutor::new())
-        .pool_max_idle_per_host(2)
-        .pool_idle_timeout(Duration::from_secs(60))
-        .build(https)
-}
-
-/// Build a JWKS client that bypasses certificate verification. Only used by
-/// the test harness - production code should never call this.
-#[doc(hidden)]
-pub fn build_jwks_client_skip_verify() -> ProxyClient {
-    use rustls::DigitallySignedStruct;
-    use rustls::SignatureScheme;
-    use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-
-    #[derive(Debug)]
-    struct NoVerify;
-    impl ServerCertVerifier for NoVerify {
-        fn verify_server_cert(
-            &self,
-            _: &CertificateDer<'_>,
-            _: &[CertificateDer<'_>],
-            _: &ServerName<'_>,
-            _: &[u8],
-            _: UnixTime,
-        ) -> Result<ServerCertVerified, rustls::Error> {
-            Ok(ServerCertVerified::assertion())
-        }
-        fn verify_tls12_signature(
-            &self,
-            _: &[u8],
-            _: &CertificateDer<'_>,
-            _: &DigitallySignedStruct,
-        ) -> Result<HandshakeSignatureValid, rustls::Error> {
-            Ok(HandshakeSignatureValid::assertion())
-        }
-        fn verify_tls13_signature(
-            &self,
-            _: &[u8],
-            _: &CertificateDer<'_>,
-            _: &DigitallySignedStruct,
-        ) -> Result<HandshakeSignatureValid, rustls::Error> {
-            Ok(HandshakeSignatureValid::assertion())
-        }
-        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-            rustls::crypto::aws_lc_rs::default_provider()
-                .signature_verification_algorithms
-                .supported_schemes()
-        }
-    }
-
-    let tls_config = ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(NoVerify))
-        .with_no_client_auth();
-    let mut http = HttpConnector::new();
-    http.enforce_http(false);
-    let https = HttpsConnectorBuilder::new()
-        .with_tls_config(tls_config)
-        .https_or_http()
-        .enable_http1()
-        .enable_http2()
-        .wrap_connector(http);
-    Client::builder(TokioExecutor::new())
-        .pool_max_idle_per_host(2)
-        .build(https)
-}
-
-/// Extract a bearer token from the `Authorization` header. Returns None if
-/// the header is missing or doesn't start with `Bearer `.
-pub fn extract_bearer_token(headers: &http::HeaderMap) -> Option<&str> {
-    let v = headers.get(http::header::AUTHORIZATION)?.to_str().ok()?;
-    let token = v
-        .strip_prefix("Bearer ")
-        .or_else(|| v.strip_prefix("bearer "))?;
-    if token.is_empty() {
-        return None;
-    }
-    Some(token)
 }
 
 #[cfg(test)]
