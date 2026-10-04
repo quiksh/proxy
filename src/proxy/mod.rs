@@ -369,6 +369,22 @@ async fn forward_inner(
         )
     };
 
+    // ── max_body_bytes module ────────────────────────────────────────────────
+    // Pre-check: any inbound request whose declared Content-Length exceeds
+    // the limit is rejected before auth (no JWKS / authorizer round trip for
+    // a request we'd refuse anyway) and before we open an upstream connection. Streaming
+    // bodies without a Content-Length are not currently enforced per-frame.
+    if let Some(max) = modules.max_body_bytes
+        && let Some(cl) = parts.headers.get(CONTENT_LENGTH)
+        && let Ok(s) = cl.to_str()
+        && let Ok(n) = s.parse::<u64>()
+        && n > max
+    {
+        metrics::counter!("quik_proxy_errors_total", "kind" => "body_too_large").increment(1);
+        record_terminal(&route_label, 413, start, None);
+        return synth(StatusCode::PAYLOAD_TOO_LARGE, "body too large\n");
+    }
+
     // ── auth + authorizer modules ────────────────────────────────────────────
     if let Err(resp) = authenticate(
         auth,
@@ -383,21 +399,6 @@ async fn forward_inner(
     .await
     {
         return *resp;
-    }
-
-    // ── max_body_bytes module ────────────────────────────────────────────────
-    // Pre-check: any inbound request whose declared Content-Length exceeds
-    // the limit is rejected before we open an upstream connection. Streaming
-    // bodies without a Content-Length are not currently enforced per-frame.
-    if let Some(max) = modules.max_body_bytes
-        && let Some(cl) = parts.headers.get(CONTENT_LENGTH)
-        && let Ok(s) = cl.to_str()
-        && let Ok(n) = s.parse::<u64>()
-        && n > max
-    {
-        metrics::counter!("quik_proxy_errors_total", "kind" => "body_too_large").increment(1);
-        record_terminal(&route_label, 413, start, None);
-        return synth(StatusCode::PAYLOAD_TOO_LARGE, "body too large\n");
     }
 
     let pool = match upstreams.get(&pool_name) {
@@ -1146,10 +1147,6 @@ async fn apply_route_authorizer(
     head: &mut http::request::Parts,
     ctx: AuthzCtx<'_>,
 ) -> Result<(), Rejection> {
-    let outcome = |o: &'static str| {
-        metrics::counter!("quik_authorizer_total", "authorizer" => name.to_owned(), "outcome" => o)
-            .increment(1);
-    };
     let Some(authz) = auth.get_authorizer(name) else {
         tracing::error!(authorizer = %name, "route references missing authorizer - config drift");
         metrics::counter!("quik_proxy_errors_total", "kind" => "authorizer_misconfig").increment(1);
@@ -1161,7 +1158,7 @@ async fn apply_route_authorizer(
     };
     // SECURITY: a client must not pre-set a header the authorizer may inject.
     if let Some(h) = authz.reserved_present(&head.headers) {
-        outcome("spoofed_header");
+        authz.metrics.spoofed_header.increment(1);
         tracing::debug!(authorizer = %name, header = %h, "client supplied reserved header");
         record_terminal(ctx.route_label, 403, ctx.start, None);
         return Err(Box::new(unauthorized_with_status(
@@ -1182,7 +1179,7 @@ async fn apply_route_authorizer(
         .await;
     match verdict {
         Ok(AuthzVerdict::Allow(inject)) => {
-            outcome("allow");
+            authz.metrics.allow.increment(1);
             for (k, v) in inject {
                 head.headers.insert(k, v);
             }
@@ -1193,7 +1190,7 @@ async fn apply_route_authorizer(
             headers,
             body,
         }) => {
-            outcome("deny");
+            authz.metrics.deny.increment(1);
             record_terminal(ctx.route_label, status.as_u16(), ctx.start, None);
             let mut resp = Response::new(into_proxy_body(Full::new(body)));
             *resp.status_mut() = status;
@@ -1201,12 +1198,12 @@ async fn apply_route_authorizer(
             Err(Box::new(resp))
         }
         Err(e) if authz.on_error == AuthorizerOnError::Allow => {
-            outcome("error_allowed");
+            authz.metrics.error_allowed.increment(1);
             tracing::warn!(authorizer = %name, error = %e, "authorizer failed - on_error=allow, forwarding");
             Ok(())
         }
         Err(e) => {
-            outcome("error_denied");
+            authz.metrics.error_denied.increment(1);
             tracing::warn!(authorizer = %name, error = %e, "authorizer failed - denying");
             record_terminal(ctx.route_label, 503, ctx.start, None);
             Err(Box::new(synth(

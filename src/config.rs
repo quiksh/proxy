@@ -1086,9 +1086,7 @@ const AUTHORIZER_FORBIDDEN_INJECT: &[&str] = &[
     "content-encoding",
     "authorization",
     "cookie",
-    "x-forwarded-for",
-    "x-forwarded-host",
-    "x-forwarded-proto",
+    "x-real-ip",
     "forwarded",
     "x-request-id",
     "request-id",
@@ -1123,9 +1121,12 @@ fn validate_authorizers(authorizers: &[AuthorizerConfig]) -> Result<()> {
         for h in &a.inject_headers {
             http::HeaderName::try_from(h.as_str())
                 .with_context(|| format!("{}: invalid inject_headers entry '{h}'", ctx()))?;
+            // Every `x-forwarded-*` header is quik's (or a trusted hop's) to
+            // set - upstream frameworks trust them for client IP / URL building.
             if AUTHORIZER_FORBIDDEN_INJECT
                 .iter()
                 .any(|f| f.eq_ignore_ascii_case(h))
+                || h.to_ascii_lowercase().starts_with("x-forwarded-")
             {
                 anyhow::bail!("{}: header '{h}' cannot be injected", ctx());
             }
@@ -1562,6 +1563,11 @@ bind = "127.0.0.1:9090"
             ),
             (
                 "url=\"http://x/\"\ninject_headers=[\"x-forwarded-for\"]",
+                "",
+                "cannot be injected",
+            ),
+            (
+                "url=\"http://x/\"\ninject_headers=[\"X-Forwarded-Prefix\"]",
                 "",
                 "cannot be injected",
             ),

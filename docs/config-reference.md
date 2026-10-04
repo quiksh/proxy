@@ -489,7 +489,8 @@ carries one (in any letter case), quik rejects it with 403
 
 Some headers can't be listed in `inject_headers` because quik controls them:
 hop-by-hop headers, `host`, `content-length`, `content-type`,
-`content-encoding`, `authorization`, `cookie`, `x-forwarded-*`, `forwarded`,
+`content-encoding`, `authorization`, `cookie`, every `x-forwarded-*` header,
+`x-real-ip`, `forwarded`,
 `x-request-id`/`request-id` and `traceparent`. A route can't use an `auth`
 block and an authoriser that inject the same header; config validation
 rejects the overlap.

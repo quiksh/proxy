@@ -14,15 +14,12 @@ use crate::config::AuthorizerTlsConfig;
 use crate::tls::{parse_certs, parse_key};
 use crate::upstream::ProxyClient;
 
-pub(super) fn build_jwks_client() -> ProxyClient {
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let tls_config = ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+/// Shared connector + pool setup for every outbound auth client: plain HTTP
+/// or HTTPS (ALPN h2/http1.1) over `tls_config`, `TCP_NODELAY` on.
+fn build_client(tls_config: ClientConfig, max_idle_per_host: usize, idle: Duration) -> ProxyClient {
     let mut http = HttpConnector::new();
     http.enforce_http(false);
+    http.set_nodelay(true);
     let https = HttpsConnectorBuilder::new()
         .with_tls_config(tls_config)
         .https_or_http()
@@ -30,9 +27,25 @@ pub(super) fn build_jwks_client() -> ProxyClient {
         .enable_http2()
         .wrap_connector(http);
     Client::builder(TokioExecutor::new())
-        .pool_max_idle_per_host(2)
-        .pool_idle_timeout(Duration::from_secs(60))
+        .pool_max_idle_per_host(max_idle_per_host)
+        .pool_idle_timeout(idle)
         .build(https)
+}
+
+/// The bundled public (webpki) roots. Installs the process crypto provider on
+/// first use.
+fn public_roots() -> rustls::RootCertStore {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    roots
+}
+
+pub(super) fn build_jwks_client() -> ProxyClient {
+    let tls_config = ClientConfig::builder()
+        .with_root_certificates(public_roots())
+        .with_no_client_auth();
+    build_client(tls_config, 2, Duration::from_secs(60))
 }
 
 /// Build a JWKS client that bypasses certificate verification. Only used by
@@ -86,17 +99,7 @@ pub fn build_jwks_client_skip_verify() -> ProxyClient {
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(NoVerify))
         .with_no_client_auth();
-    let mut http = HttpConnector::new();
-    http.enforce_http(false);
-    let https = HttpsConnectorBuilder::new()
-        .with_tls_config(tls_config)
-        .https_or_http()
-        .enable_http1()
-        .enable_http2()
-        .wrap_connector(http);
-    Client::builder(TokioExecutor::new())
-        .pool_max_idle_per_host(2)
-        .build(https)
+    build_client(tls_config, 2, Duration::from_secs(90))
 }
 
 /// Build the client for one `[[authorizers]]` block. Trusts the bundled public
@@ -104,9 +107,7 @@ pub fn build_jwks_client_skip_verify() -> ProxyClient {
 /// `tls.cert_path`/`key_path` are set. Unlike the JWKS client this one is on
 /// the request path, so it keeps a larger idle pool to avoid handshakes.
 pub(super) fn build_authorizer_client(tls: &AuthorizerTlsConfig) -> Result<ProxyClient> {
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let mut roots = public_roots();
     if let Some(path) = &tls.ca_path {
         let pem = std::fs::read(path).with_context(|| format!("reading tls.ca_path '{path}'"))?;
         for cert in parse_certs(&pem).with_context(|| format!("tls.ca_path '{path}'"))? {
@@ -128,17 +129,5 @@ pub(super) fn build_authorizer_client(tls: &AuthorizerTlsConfig) -> Result<Proxy
         }
         _ => builder.with_no_client_auth(),
     };
-    let mut http = HttpConnector::new();
-    http.enforce_http(false);
-    http.set_nodelay(true);
-    let https = HttpsConnectorBuilder::new()
-        .with_tls_config(tls_config)
-        .https_or_http()
-        .enable_http1()
-        .enable_http2()
-        .wrap_connector(http);
-    Ok(Client::builder(TokioExecutor::new())
-        .pool_max_idle_per_host(32)
-        .pool_idle_timeout(Duration::from_secs(90))
-        .build(https))
+    Ok(build_client(tls_config, 32, Duration::from_secs(90)))
 }

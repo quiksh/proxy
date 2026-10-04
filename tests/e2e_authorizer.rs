@@ -461,3 +461,35 @@ async fn websocket_upgrade_consults_authorizer() {
     ws.close(None).await.unwrap();
     assert_eq!(authz.envelopes().len(), 2);
 }
+
+/// A declared body over the route's `max_body_bytes` is refused before the
+/// authorizer is called - no round trip for a request we'd reject anyway.
+#[tokio::test]
+async fn oversized_content_length_skips_authorizer() {
+    let authz = MockAuthorizer::spawn(|_| (204, vec![], String::new())).await;
+    let backend = Backend::spawn("a").await;
+    let proxy = common::spawn_proxy_with_authorizers(
+        ProxySpec {
+            pools: vec![common::Backends::http("p", vec![backend.addr])],
+            routes: vec![RouteConfig {
+                path_prefix: Some("/api".to_string()),
+                authorizer: Some("internal".to_string()),
+                max_body_bytes: Some(8),
+                upstream: "p".to_string(),
+                ..Default::default()
+            }],
+        },
+        vec![],
+        vec![authorizer_config(authz.addr)],
+    )
+    .await;
+
+    let resp = https_client_http1_only()
+        .post(url(proxy.addr, "/api/x"))
+        .body("x".repeat(64))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(authz.envelopes().is_empty());
+}

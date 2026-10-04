@@ -25,6 +25,7 @@ use bytes::Bytes;
 use http::header::{CONTENT_TYPE, USER_AGENT, WWW_AUTHENTICATE};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, Uri};
 use http_body_util::{BodyExt, Full, Limited};
+use metrics::{Counter, Histogram};
 use serde::{Deserialize, Serialize};
 
 use super::Claims;
@@ -38,8 +39,42 @@ const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 /// Envelope schema version, sent as `version` so the wire format can evolve.
 const ENVELOPE_VERSION: &str = "1";
 
+/// Metric handles pre-built per authorizer, so the request path does no label
+/// allocation or registry lookup (same pattern as per-upstream-member handles).
+/// Built after the recorder is installed (startup and reload both are).
+pub struct AuthorizerMetrics {
+    pub allow: Counter,
+    pub deny: Counter,
+    pub error_denied: Counter,
+    pub error_allowed: Counter,
+    pub spoofed_header: Counter,
+    duration: Histogram,
+}
+
+impl AuthorizerMetrics {
+    fn new(name: &str) -> Self {
+        let c = |outcome: &'static str| {
+            metrics::counter!("quik_authorizer_total",
+                "authorizer" => name.to_owned(),
+                "outcome" => outcome
+            )
+        };
+        Self {
+            allow: c("allow"),
+            deny: c("deny"),
+            error_denied: c("error_denied"),
+            error_allowed: c("error_allowed"),
+            spoofed_header: c("spoofed_header"),
+            duration: metrics::histogram!("quik_authorizer_duration_seconds",
+                "authorizer" => name.to_owned()
+            ),
+        }
+    }
+}
+
 pub struct HttpAuthorizer {
     pub name: String,
+    pub metrics: AuthorizerMetrics,
     pub on_error: AuthorizerOnError,
     uri: Uri,
     timeout: Duration,
@@ -103,6 +138,7 @@ impl HttpAuthorizer {
         };
         Ok(Self {
             name: cfg.name.clone(),
+            metrics: AuthorizerMetrics::new(&cfg.name),
             on_error: cfg.on_error,
             uri: cfg.url.parse().context("parsing authorizer url")?,
             timeout: Duration::from_millis(cfg.timeout_ms),
@@ -131,7 +167,8 @@ impl HttpAuthorizer {
         let result = tokio::time::timeout(self.timeout, self.call(req))
             .await
             .unwrap_or_else(|_| Err(anyhow::anyhow!("timed out after {:?}", self.timeout)));
-        metrics::histogram!("quik_authorizer_duration_seconds", "authorizer" => self.name.clone())
+        self.metrics
+            .duration
             .record(started.elapsed().as_secs_f64());
         result
     }
@@ -218,7 +255,7 @@ impl HttpAuthorizer {
         }
         let parsed: AllowBody =
             serde_json::from_slice(body).context("authorizer allow body is not valid JSON")?;
-        let mut out = Vec::with_capacity(parsed.headers.len());
+        let mut out: Vec<(HeaderName, HeaderValue)> = Vec::with_capacity(parsed.headers.len());
         for (name, value) in parsed.headers {
             let allowed = HeaderName::try_from(name.as_str())
                 .ok()
@@ -231,6 +268,11 @@ impl HttpAuthorizer {
                 );
                 continue;
             };
+            // `X-Tenant-Id` and `x-tenant-id` are the same header; which one
+            // wins would depend on map iteration order, so fail closed.
+            if out.iter().any(|(h, _)| *h == header) {
+                anyhow::bail!("header '{header}' returned more than once (case variants)");
+            }
             let value = HeaderValue::try_from(value)
                 .with_context(|| format!("invalid value for header '{header}'"))?;
             out.push((header, value));
@@ -296,6 +338,11 @@ mod tests {
         );
         assert!(
             a.allowed_headers(br#"{"headers":{"x-user-id":"bad\nvalue"}}"#)
+                .is_err()
+        );
+        // Case variants of one header are ambiguous - fail closed.
+        assert!(
+            a.allowed_headers(br#"{"headers":{"x-user-id":"a","X-User-Id":"b"}}"#)
                 .is_err()
         );
     }
