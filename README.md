@@ -72,6 +72,18 @@ per upstream member, the in-flight counter is a single atomic, and bodies
 stream end-to-end without buffering. See `benches/hot_path.rs` for the
 microbenchmarks.
 
+**Throughput.** `scripts/bench-scaling.sh` uses `wrk` to sweep quik's worker
+threads × response size. It measures requests per second over reused
+connections, and connections per second with a full TCP + TLS handshake on
+every request. It also records quik's CPU time per request and a no-proxy
+ceiling for comparison. On an Apple M3 Pro laptop, with the load generator,
+quik and backend sharing the machine, quik used **~43 µs of CPU per 1 KB
+request** including TLS termination. That's about 23k requests/s per fully
+used core. Absolute throughput levels off at the laptop's loopback limit, so
+for real numbers run the script on Linux with the load generator on a
+separate host. `scripts/bench-authz-tls.sh` measures the cost of TLS and mTLS
+on the authoriser hop.
+
 ## Deployment scenarios
 
 | Scenario                              | Guide                                             |

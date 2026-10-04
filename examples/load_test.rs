@@ -2,12 +2,17 @@
 //!
 //! Usage:
 //!   cargo run --release --example load_test -- <url> [concurrency=32] [duration_secs=10]
+//!       [--http1] [--no-keepalive]
+//!
+//! `--no-keepalive` opens a fresh connection (and TLS handshake) per request,
+//! measuring connections per second rather than requests over warm
+//! connections. Each task records into its own histogram (merged at the end),
+//! so the client doesn't serialise on a shared lock at high request rates.
 //!
 //! Reports p50/p90/p99/p999 (µs), max, total requests, errors, and QPS.
 //! Accepts self-signed certs (intended for testing the proxy locally).
 
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -19,6 +24,7 @@ struct Args {
     concurrency: usize,
     duration: Duration,
     http1_only: bool,
+    no_keepalive: bool,
 }
 
 fn parse_args() -> Result<Args> {
@@ -26,11 +32,13 @@ fn parse_args() -> Result<Args> {
     let mut concurrency = 32usize;
     let mut duration_secs = 10u64;
     let mut http1_only = false;
+    let mut no_keepalive = false;
 
     let mut iter = std::env::args().skip(1).peekable();
     while let Some(a) = iter.next() {
         match a.as_str() {
             "--http1" => http1_only = true,
+            "--no-keepalive" => no_keepalive = true,
             "-c" | "--concurrency" => {
                 concurrency = iter
                     .next()
@@ -60,13 +68,15 @@ fn parse_args() -> Result<Args> {
         }
     }
 
-    let url =
-        url.context("usage: load_test <url> [-c concurrency] [-d duration_secs] [--http1]")?;
+    let url = url.context(
+        "usage: load_test <url> [-c concurrency] [-d duration_secs] [--http1] [--no-keepalive]",
+    )?;
     Ok(Args {
         url,
         concurrency,
         duration: Duration::from_secs(duration_secs),
         http1_only,
+        no_keepalive,
     })
 }
 
@@ -76,24 +86,27 @@ async fn main() -> Result<()> {
 
     let mut builder = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
-        .pool_max_idle_per_host(args.concurrency)
+        .pool_max_idle_per_host(if args.no_keepalive {
+            0
+        } else {
+            args.concurrency
+        })
         .tcp_nodelay(true);
     if args.http1_only {
         builder = builder.http1_only();
     }
     let client = builder.build().context("building client")?;
 
-    // 3 sig figs is plenty; histogram covers 1µs..1 minute.
-    let histogram = Arc::new(Mutex::new(
-        Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).expect("histogram"),
-    ));
+    // 3 sig figs is plenty; histogram covers 1µs..1 minute. One per task,
+    // merged after the run.
+    let new_hist = || Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).expect("histogram");
     let counter = Arc::new(AtomicU64::new(0));
     let errors = Arc::new(AtomicU64::new(0));
 
     let stop_at = Instant::now() + args.duration;
     eprintln!(
-        "load_test: url={} concurrency={} duration={:?} http1_only={}",
-        args.url, args.concurrency, args.duration, args.http1_only
+        "load_test: url={} concurrency={} duration={:?} http1_only={} keepalive={}",
+        args.url, args.concurrency, args.duration, args.http1_only, !args.no_keepalive
     );
 
     let started = Instant::now();
@@ -101,7 +114,7 @@ async fn main() -> Result<()> {
     for _ in 0..args.concurrency {
         let client = client.clone();
         let url = args.url.clone();
-        let histogram = histogram.clone();
+        let mut histogram = new_hist();
         let counter = counter.clone();
         let errors = errors.clone();
         handles.push(tokio::spawn(async move {
@@ -112,7 +125,7 @@ async fn main() -> Result<()> {
                         let _ = resp.bytes().await;
                         let micros = t.elapsed().as_micros() as u64;
                         let micros = micros.clamp(1, 60_000_000);
-                        let _ = histogram.lock().unwrap().record(micros);
+                        let _ = histogram.record(micros);
                         counter.fetch_add(1, Ordering::Relaxed);
                     }
                     Err(_) => {
@@ -120,17 +133,20 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+            histogram
         }));
     }
 
+    let mut hist = new_hist();
     for h in handles {
-        let _ = h.await;
+        if let Ok(local) = h.await {
+            let _ = hist.add(&local);
+        }
     }
 
     let elapsed = started.elapsed();
     let req = counter.load(Ordering::Relaxed);
     let err = errors.load(Ordering::Relaxed);
-    let hist = histogram.lock().unwrap();
     let qps = req as f64 / elapsed.as_secs_f64();
 
     println!();
