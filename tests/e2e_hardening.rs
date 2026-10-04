@@ -100,7 +100,7 @@ async fn connect_ws(
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let mut tls_config = rustls::ClientConfig::builder()
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(TestNoVerifier))
+        .with_custom_certificate_verifier(Arc::new(common::TestNoVerifier))
         .with_no_client_auth();
     tls_config.alpn_protocols = vec![b"http/1.1".to_vec()];
 
@@ -113,41 +113,4 @@ async fn connect_ws(
     )
     .await
     .expect("ws connect")
-}
-
-#[derive(Debug)]
-struct TestNoVerifier;
-
-impl rustls::client::danger::ServerCertVerifier for TestNoVerifier {
-    fn verify_server_cert(
-        &self,
-        _: &rustls::pki_types::CertificateDer<'_>,
-        _: &[rustls::pki_types::CertificateDer<'_>],
-        _: &rustls::pki_types::ServerName<'_>,
-        _: &[u8],
-        _: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-    fn verify_tls12_signature(
-        &self,
-        _: &[u8],
-        _: &rustls::pki_types::CertificateDer<'_>,
-        _: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-    fn verify_tls13_signature(
-        &self,
-        _: &[u8],
-        _: &rustls::pki_types::CertificateDer<'_>,
-        _: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::aws_lc_rs::default_provider()
-            .signature_verification_algorithms
-            .supported_schemes()
-    }
 }

@@ -58,6 +58,26 @@ pub fn strip_hop_by_hop(headers: &mut HeaderMap) {
     headers.remove("keep-alive");
 }
 
+/// For a protocol-upgrade request (WebSocket), which must keep its `Connection:
+/// upgrade` + `Upgrade` pair: remove every other header the client named in
+/// `Connection`, then pin `Connection` to `upgrade`. Without this a client
+/// could list an identity header that auth later injects, and a downstream
+/// hop would strip it.
+pub fn sanitize_upgrade_connection(headers: &mut HeaderMap) {
+    let names_in_connection: Vec<HeaderName> = headers
+        .get_all(CONNECTION)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|s| s.split(','))
+        .filter_map(|s| HeaderName::try_from(s.trim()).ok())
+        .filter(|n| *n != UPGRADE)
+        .collect();
+    for name in names_in_connection {
+        headers.remove(&name);
+    }
+    headers.insert(CONNECTION, HeaderValue::from_static("upgrade"));
+}
+
 // ── Random helpers (hand-rolled - see audit, replaces the `uuid` dep) ────────
 
 fn fill_random(buf: &mut [u8]) {
@@ -350,6 +370,18 @@ pub fn apply_forwarded_proto(headers: &mut HeaderMap, scheme: &'static str) {
 mod tests {
     use super::*;
     use http::header::{CONNECTION, TRANSFER_ENCODING, UPGRADE};
+
+    #[test]
+    fn sanitize_upgrade_connection_drops_nominated_headers_keeps_upgrade() {
+        let mut h = HeaderMap::new();
+        h.insert(CONNECTION, HeaderValue::from_static("Upgrade, X-Auth-Sub"));
+        h.insert(UPGRADE, HeaderValue::from_static("websocket"));
+        h.insert("x-auth-sub", HeaderValue::from_static("spoof"));
+        sanitize_upgrade_connection(&mut h);
+        assert_eq!(h.get(CONNECTION).unwrap(), "upgrade");
+        assert_eq!(h.get(UPGRADE).unwrap(), "websocket");
+        assert!(h.get("x-auth-sub").is_none());
+    }
 
     #[test]
     fn removes_standard_hop_by_hop() {
