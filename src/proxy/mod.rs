@@ -24,7 +24,7 @@
 //!   remove the very headers the upgrade handshake needs.
 
 use std::convert::Infallible;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -44,7 +44,10 @@ use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tracing::Instrument;
 
-use crate::auth::{AuthError, SharedAuthRegistry, extract_bearer_token};
+use crate::auth::{
+    AuthError, AuthzRequest, AuthzVerdict, Claims, SharedAuthRegistry, extract_bearer_token,
+};
+use crate::config::AuthorizerOnError;
 use crate::config::Mode;
 use crate::headers::{
     SharedForwardedPolicy, apply_forwarded, apply_forwarded_for, apply_forwarded_host,
@@ -350,7 +353,7 @@ async fn forward_inner(
     let path = parts.uri.path();
     let method = &parts.method;
 
-    let (route_label, pool_name, modules, auth_name) = {
+    let (route_label, pool_name, modules, auth_name, authorizer_name) = {
         let table = routing.load();
         let Some(route) = table.match_request(host, method, path) else {
             let none_label: Arc<str> = Arc::from("_none");
@@ -362,13 +365,22 @@ async fn forward_inner(
             route.upstream_pool.clone(),
             route.modules.clone(),
             route.auth.clone(),
+            route.authorizer.clone(),
         )
     };
 
-    // ── auth module (per-route JWT validation) ────────────────────────────────
-    if let Some(name) = &auth_name
-        && let Err(resp) =
-            apply_route_auth(auth, name, &mut parts.headers, &route_label, start).await
+    // ── auth + authorizer modules ────────────────────────────────────────────
+    if let Err(resp) = authenticate(
+        auth,
+        auth_name.as_deref(),
+        authorizer_name.as_deref(),
+        &mut parts,
+        peer_ip,
+        &request_id,
+        &route_label,
+        start,
+    )
+    .await
     {
         return *resp;
     }
@@ -848,7 +860,7 @@ async fn handle_ws_upgrade(
     let path = req.uri().path();
     let method = req.method().clone();
 
-    let (route_label, pool_name, auth_name) = {
+    let (route_label, pool_name, auth_name, authorizer_name) = {
         let table = routing.load();
         let Some(route) = table.match_request(host, &method, path) else {
             let none_label: Arc<str> = Arc::from("_none");
@@ -859,17 +871,30 @@ async fn handle_ws_upgrade(
             route.label.clone(),
             route.upstream_pool.clone(),
             route.auth.clone(),
+            route.authorizer.clone(),
         )
     };
 
     // SECURITY: route auth applies to upgrades exactly as to plain requests -
-    // without this an `Upgrade: websocket` header would skip the JWT check.
-    if let Some(name) = &auth_name
-        && let Err(resp) =
-            apply_route_auth(auth, name, req.headers_mut(), &route_label, start).await
+    // without this an `Upgrade: websocket` header would skip the JWT check and
+    // the authorizer. Split + reassemble keeps the extensions (incl. hyper's
+    // pending upgrade) intact.
+    let (mut head, body) = req.into_parts();
+    if let Err(resp) = authenticate(
+        auth,
+        auth_name.as_deref(),
+        authorizer_name.as_deref(),
+        &mut head,
+        peer_ip,
+        &request_id,
+        &route_label,
+        start,
+    )
+    .await
     {
         return *resp;
     }
+    let mut req = Request::from_parts(head, body);
 
     let pool = match upstreams.get(&pool_name) {
         Some(p) => p,
@@ -1065,18 +1090,144 @@ async fn handle_ws_upgrade(
 /// on every `Result` carrying it.
 type Rejection = Box<Response<ProxyBody>>;
 
+/// Run the route's `auth` (JWT) and then `authorizer` (external HTTP) modules
+/// against the request head. On rejection, records the terminal access-log
+/// line and returns the response to send. Shared by the plain forwarding path
+/// and the WebSocket upgrade path so an `Upgrade` request can't bypass either.
+#[allow(clippy::too_many_arguments)]
+async fn authenticate(
+    auth: &SharedAuthRegistry,
+    auth_name: Option<&str>,
+    authorizer_name: Option<&str>,
+    head: &mut http::request::Parts,
+    peer_ip: IpAddr,
+    request_id: &str,
+    route_label: &Arc<str>,
+    start: Instant,
+) -> Result<(), Rejection> {
+    let claims = match auth_name {
+        Some(name) => {
+            Some(apply_route_auth(auth, name, &mut head.headers, route_label, start).await?)
+        }
+        None => None,
+    };
+    if let Some(name) = authorizer_name {
+        apply_route_authorizer(
+            auth,
+            name,
+            head,
+            AuthzCtx {
+                peer_ip,
+                request_id,
+                claims: claims.as_ref(),
+                route_label,
+                start,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Per-request context for [`apply_route_authorizer`].
+struct AuthzCtx<'a> {
+    peer_ip: IpAddr,
+    request_id: &'a str,
+    claims: Option<&'a Claims>,
+    route_label: &'a Arc<str>,
+    start: Instant,
+}
+
+/// Consult the route's external authorizer. Allow → write its headers into
+/// `head`; deny → relay its 4xx; no verdict → `on_error` (503 or fail open).
+async fn apply_route_authorizer(
+    auth: &SharedAuthRegistry,
+    name: &str,
+    head: &mut http::request::Parts,
+    ctx: AuthzCtx<'_>,
+) -> Result<(), Rejection> {
+    let outcome = |o: &'static str| {
+        metrics::counter!("quik_authorizer_total", "authorizer" => name.to_owned(), "outcome" => o)
+            .increment(1);
+    };
+    let Some(authz) = auth.get_authorizer(name) else {
+        tracing::error!(authorizer = %name, "route references missing authorizer - config drift");
+        metrics::counter!("quik_proxy_errors_total", "kind" => "authorizer_misconfig").increment(1);
+        record_terminal(ctx.route_label, 500, ctx.start, None);
+        return Err(Box::new(synth(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "auth misconfigured\n",
+        )));
+    };
+    // SECURITY: a client must not pre-set a header the authorizer may inject.
+    if let Some(h) = authz.reserved_present(&head.headers) {
+        outcome("spoofed_header");
+        tracing::debug!(authorizer = %name, header = %h, "client supplied reserved header");
+        record_terminal(ctx.route_label, 403, ctx.start, None);
+        return Err(Box::new(unauthorized_with_status(
+            StatusCode::FORBIDDEN,
+            "auth rejected",
+        )));
+    }
+    let verdict = authz
+        .authorize(AuthzRequest {
+            method: &head.method,
+            uri: &head.uri,
+            headers: &head.headers,
+            source_ip: ctx.peer_ip,
+            route: ctx.route_label,
+            request_id: ctx.request_id,
+            claims: ctx.claims,
+        })
+        .await;
+    match verdict {
+        Ok(AuthzVerdict::Allow(inject)) => {
+            outcome("allow");
+            for (k, v) in inject {
+                head.headers.insert(k, v);
+            }
+            Ok(())
+        }
+        Ok(AuthzVerdict::Deny {
+            status,
+            headers,
+            body,
+        }) => {
+            outcome("deny");
+            record_terminal(ctx.route_label, status.as_u16(), ctx.start, None);
+            let mut resp = Response::new(into_proxy_body(Full::new(body)));
+            *resp.status_mut() = status;
+            *resp.headers_mut() = headers;
+            Err(Box::new(resp))
+        }
+        Err(e) if authz.on_error == AuthorizerOnError::Allow => {
+            outcome("error_allowed");
+            tracing::warn!(authorizer = %name, error = %e, "authorizer failed - on_error=allow, forwarding");
+            Ok(())
+        }
+        Err(e) => {
+            outcome("error_denied");
+            tracing::warn!(authorizer = %name, error = %e, "authorizer failed - denying");
+            record_terminal(ctx.route_label, 503, ctx.start, None);
+            Err(Box::new(synth(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "authorizer unavailable\n",
+            )))
+        }
+    }
+}
+
 /// Run the route's `[[auth]]` block against the inbound headers: validate the
-/// bearer token and write any claim-mapped headers. On rejection, records the
-/// terminal access-log line and returns the response to send. Shared by the
-/// plain forwarding path and the WebSocket upgrade path so an `Upgrade` request
-/// can't bypass route auth.
+/// bearer token and write any claim-mapped headers, returning the verified
+/// claims. On rejection, records the terminal access-log line and returns the
+/// response to send.
 async fn apply_route_auth(
     auth: &SharedAuthRegistry,
     name: &str,
     headers: &mut HeaderMap,
     route_label: &Arc<str>,
     start: Instant,
-) -> Result<(), Rejection> {
+) -> Result<Claims, Rejection> {
     let Some(validator) = auth.get(name) else {
         tracing::error!(auth = %name, "route references missing auth - config drift");
         metrics::counter!("quik_proxy_errors_total", "kind" => "auth_misconfig").increment(1);
@@ -1095,10 +1246,10 @@ async fn apply_route_auth(
         return Err(Box::new(unauthorized("missing bearer token")));
     };
     match validator.validate_and_inject(&token, headers).await {
-        Ok(()) => {
+        Ok(claims) => {
             metrics::counter!("quik_auth_total", "auth" => name.to_owned(), "outcome" => "ok")
                 .increment(1);
-            Ok(())
+            Ok(claims)
         }
         Err(e) => {
             let outcome = match &e {

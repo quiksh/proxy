@@ -623,7 +623,7 @@ pub async fn spawn_proxy(spec: ProxySpec) -> ProxyHandle {
     spawn_proxy_full(
         spec,
         Mode::Edge,
-        vec![],
+        Default::default(),
         None,
         None,
         None,
@@ -633,7 +633,16 @@ pub async fn spawn_proxy(spec: ProxySpec) -> ProxyHandle {
 }
 
 pub async fn spawn_proxy_with_mode(spec: ProxySpec, mode: Mode) -> ProxyHandle {
-    spawn_proxy_full(spec, mode, vec![], None, None, None, Default::default()).await
+    spawn_proxy_full(
+        spec,
+        mode,
+        Default::default(),
+        None,
+        None,
+        None,
+        Default::default(),
+    )
+    .await
 }
 
 /// Spawn a proxy with a `[forwarded]` policy (trusted proxies / RFC 7239
@@ -643,7 +652,7 @@ pub async fn spawn_proxy_with_forwarded(
     mode: Mode,
     forwarded: quik::config::ForwardedConfig,
 ) -> ProxyHandle {
-    spawn_proxy_full(spec, mode, vec![], None, None, None, forwarded).await
+    spawn_proxy_full(spec, mode, Default::default(), None, None, None, forwarded).await
 }
 
 /// Spawn a proxy with overridden listener limits. Used by the hardening
@@ -655,7 +664,7 @@ pub async fn spawn_proxy_with_limits(
     spawn_proxy_full(
         spec,
         Mode::Edge,
-        vec![],
+        Default::default(),
         None,
         Some(limits),
         None,
@@ -668,10 +677,19 @@ pub async fn spawn_proxy_with_auth(
     spec: ProxySpec,
     auth_blocks: Vec<AuthBlockConfig>,
 ) -> ProxyHandle {
+    spawn_proxy_with_authorizers(spec, auth_blocks, vec![]).await
+}
+
+/// Spawn a proxy with `[[auth]]` blocks and `[[authorizers]]` configured.
+pub async fn spawn_proxy_with_authorizers(
+    spec: ProxySpec,
+    auth_blocks: Vec<AuthBlockConfig>,
+    authorizers: Vec<quik::config::AuthorizerConfig>,
+) -> ProxyHandle {
     spawn_proxy_full(
         spec,
         Mode::Edge,
-        auth_blocks,
+        (auth_blocks, authorizers),
         None,
         None,
         None,
@@ -689,7 +707,7 @@ pub async fn spawn_proxy_with_admin_auth(
     spawn_proxy_full(
         spec,
         Mode::Edge,
-        vec![],
+        Default::default(),
         Some(admin_auth),
         None,
         None,
@@ -704,7 +722,7 @@ pub async fn spawn_proxy_with_nats(spec: ProxySpec, nats: quik::config::NatsConf
     spawn_proxy_full(
         spec,
         Mode::Edge,
-        vec![],
+        Default::default(),
         None,
         None,
         Some(nats),
@@ -716,7 +734,7 @@ pub async fn spawn_proxy_with_nats(spec: ProxySpec, nats: quik::config::NatsConf
 async fn spawn_proxy_full(
     spec: ProxySpec,
     mode: Mode,
-    auth_blocks: Vec<AuthBlockConfig>,
+    (auth_blocks, authorizers): (Vec<AuthBlockConfig>, Vec<quik::config::AuthorizerConfig>),
     admin_auth: Option<quik::config::AdminAuthGroups>,
     limits: Option<quik::config::ListenerLimitsConfig>,
     nats: Option<quik::config::NatsConfig>,
@@ -782,6 +800,7 @@ async fn spawn_proxy_full(
         upstreams,
         routes,
         auth: auth_blocks,
+        authorizers,
         egress: None,
         nats,
     };
@@ -808,7 +827,7 @@ async fn spawn_proxy_full(
 
     // Build the auth registry. For tests we use the skip_verify JWKS client
     // so the harness's self-signed-or-plaintext JWKS server is reachable.
-    let auth_registry = if cfg.auth.is_empty() {
+    let auth_registry = if cfg.auth.is_empty() && cfg.authorizers.is_empty() {
         Arc::new(quik::auth::SharedAuthRegistry::new(
             quik::auth::AuthRegistry::empty(),
         ))

@@ -43,7 +43,7 @@ pub fn build_acceptor_from_pem(cert_pem: &[u8], key_pem: &[u8]) -> Result<TlsAcc
     Ok(TlsAcceptor::from(Arc::new(server_config)))
 }
 
-fn parse_certs(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>> {
+pub(crate) fn parse_certs(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>> {
     let mut reader = BufReader::new(pem);
     let certs: Result<Vec<_>, _> = rustls_pemfile::certs(&mut reader).collect();
     let certs = certs.context("parsing certificate PEM")?;
@@ -53,7 +53,7 @@ fn parse_certs(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>> {
     Ok(certs)
 }
 
-fn parse_key(pem: &[u8]) -> Result<PrivateKeyDer<'static>> {
+pub(crate) fn parse_key(pem: &[u8]) -> Result<PrivateKeyDer<'static>> {
     let mut reader = BufReader::new(pem);
     rustls_pemfile::private_key(&mut reader)
         .context("parsing private key PEM")?

@@ -5,8 +5,11 @@
 //!   block in config. Looked up by name from the route's `auth = "..."` field.
 //! - [`jwt`]: [`AuthValidator`] (JWT signature + claims checks, claim-to-header
 //!   injection) and [`JwksCache`] (lazily-refreshed signing keys).
-//! - [`client`]: the outbound HTTP client used to fetch JWKS documents.
+//! - [`authorizer`]: [`HttpAuthorizer`], an external HTTP service consulted
+//!   per request (`[[authorizers]]`, route field `authorizer = "..."`).
+//! - [`client`]: outbound HTTP clients for JWKS fetches and authorizers.
 
+mod authorizer;
 mod client;
 mod jwt;
 
@@ -16,51 +19,74 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 
-use crate::config::Config;
+use crate::config::{AuthorizerTlsConfig, Config};
 use crate::upstream::ProxyClient;
 
+pub use authorizer::{AuthzRequest, AuthzVerdict, HttpAuthorizer};
 pub use client::build_jwks_client_skip_verify;
 pub use jwt::{AuthError, AuthValidator, Claims, JwksCache};
 
-use client::build_jwks_client;
+use client::{build_authorizer_client, build_jwks_client};
 
 pub struct AuthRegistry {
     validators: HashMap<String, Arc<AuthValidator>>,
+    authorizers: HashMap<String, Arc<HttpAuthorizer>>,
 }
 
 impl AuthRegistry {
     pub fn empty() -> Self {
         Self {
             validators: HashMap::new(),
+            authorizers: HashMap::new(),
         }
     }
 
     pub fn from_config(cfg: &Config) -> Result<Self> {
-        let client = build_jwks_client();
-        Self::build_with_client(cfg, client)
+        Self::build_with_clients(cfg, build_jwks_client(), build_authorizer_client)
     }
 
-    /// Test-only variant that builds JWKS clients with certificate
-    /// verification disabled. Used by the integration test harness which
-    /// spawns its own self-signed (or plain-HTTP) JWKS server.
+    /// Test-only variant that builds JWKS and authorizer clients with
+    /// certificate verification disabled (authorizer `tls` settings are
+    /// ignored). Used by the integration test harness which spawns its own
+    /// self-signed (or plain-HTTP) JWKS and authorizer servers.
     #[doc(hidden)]
     pub fn from_config_for_tests(cfg: &Config) -> Result<Self> {
-        let client = build_jwks_client_skip_verify();
-        Self::build_with_client(cfg, client)
+        Self::build_with_clients(cfg, build_jwks_client_skip_verify(), |_| {
+            Ok(build_jwks_client_skip_verify())
+        })
     }
 
-    fn build_with_client(cfg: &Config, client: ProxyClient) -> Result<Self> {
+    fn build_with_clients(
+        cfg: &Config,
+        jwks_client: ProxyClient,
+        authorizer_client: fn(&AuthorizerTlsConfig) -> Result<ProxyClient>,
+    ) -> Result<Self> {
         let mut validators = HashMap::with_capacity(cfg.auth.len());
         for a in &cfg.auth {
-            let v = AuthValidator::build(a, client.clone())
+            let v = AuthValidator::build(a, jwks_client.clone())
                 .with_context(|| format!("building auth '{}'", a.name))?;
             validators.insert(a.name.clone(), Arc::new(v));
         }
-        Ok(Self { validators })
+        let mut authorizers = HashMap::with_capacity(cfg.authorizers.len());
+        for z in &cfg.authorizers {
+            let client = authorizer_client(&z.tls)
+                .with_context(|| format!("building client for authorizer '{}'", z.name))?;
+            let a = HttpAuthorizer::build(z, client)
+                .with_context(|| format!("building authorizer '{}'", z.name))?;
+            authorizers.insert(z.name.clone(), Arc::new(a));
+        }
+        Ok(Self {
+            validators,
+            authorizers,
+        })
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<AuthValidator>> {
         self.validators.get(name).cloned()
+    }
+
+    pub fn get_authorizer(&self, name: &str) -> Option<Arc<HttpAuthorizer>> {
+        self.authorizers.get(name).cloned()
     }
 }
 
@@ -97,6 +123,11 @@ impl SharedAuthRegistry {
     /// Resolve a validator by name (single lock-free load + Arc clone).
     pub fn get(&self, name: &str) -> Option<Arc<AuthValidator>> {
         self.inner.load().get(name)
+    }
+
+    /// Resolve an authorizer by name (single lock-free load + Arc clone).
+    pub fn get_authorizer(&self, name: &str) -> Option<Arc<HttpAuthorizer>> {
+        self.inner.load().get_authorizer(name)
     }
 
     /// Borrow the current registry as an `Arc`. Used at startup to seed the

@@ -37,6 +37,9 @@ pub struct Config {
     /// Named JWT auth configurations. Routes opt in via `auth = "name"`.
     #[serde(default)]
     pub auth: Vec<AuthBlockConfig>,
+    /// Named external HTTP authorizers. Routes opt in via `authorizer = "name"`.
+    #[serde(default)]
+    pub authorizers: Vec<AuthorizerConfig>,
     /// Optional egress (forward) proxy listener. When present, quik runs a
     /// CONNECT proxy on the given bind address with the configured allow/deny
     /// rules. Absent → no egress listener.
@@ -221,6 +224,64 @@ pub struct ClaimHeaderMapping {
     /// rejected with 403. Default: false (skip silently).
     #[serde(default)]
     pub required: bool,
+}
+
+/// An external HTTP authorizer: quik POSTs a JSON description of each request
+/// on a route to `url` and lets the response status decide (2xx allow, 4xx
+/// deny, anything else is an error). See `docs/config-reference.md`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthorizerConfig {
+    pub name: String,
+    /// `http://` or `https://` endpoint the envelope is POSTed to.
+    pub url: String,
+    /// Upper bound on the whole authorizer call (connect + response body).
+    /// Expiry is an authorizer error, handled per `on_error`.
+    #[serde(default = "default_authorizer_timeout_ms")]
+    pub timeout_ms: u64,
+    /// Inbound request headers copied into the envelope (case-insensitive).
+    /// Nothing is sent unless listed here.
+    #[serde(default)]
+    pub forward_headers: Vec<String>,
+    /// Allowlist of headers the authorizer may set on the upstream-bound
+    /// request. Each is also *reserved*: an inbound request carrying one is
+    /// rejected with 403 before the authorizer is called.
+    #[serde(default)]
+    pub inject_headers: Vec<String>,
+    /// What to do when the authorizer can't give a verdict (timeout, connect
+    /// error, 5xx, malformed 2xx body). Default `deny` → 503.
+    #[serde(default)]
+    pub on_error: AuthorizerOnError,
+    #[serde(default)]
+    pub tls: AuthorizerTlsConfig,
+}
+
+fn default_authorizer_timeout_ms() -> u64 {
+    1000
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthorizerOnError {
+    /// Fail closed: respond 503 without forwarding. Default.
+    #[default]
+    Deny,
+    /// Fail open: forward the request with no authorizer headers injected.
+    Allow,
+}
+
+/// TLS settings for an `https://` authorizer. All optional: with none set the
+/// server is verified against the bundled public roots.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AuthorizerTlsConfig {
+    /// PEM bundle of extra CA certificates to trust (e.g. an internal CA).
+    #[serde(default)]
+    pub ca_path: Option<String>,
+    /// PEM client certificate chain for mTLS. Requires `key_path`.
+    #[serde(default)]
+    pub cert_path: Option<String>,
+    /// PEM private key for `cert_path`.
+    #[serde(default)]
+    pub key_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Default)]
@@ -829,6 +890,10 @@ pub struct RouteConfig {
     /// Missing/invalid token → 401. Missing required claim → 403.
     #[serde(default)]
     pub auth: Option<String>,
+    /// Name of an `[[authorizers]]` block to consult for requests on this
+    /// route. Runs after `auth` (when both are set) and sees its claims.
+    #[serde(default)]
+    pub authorizer: Option<String>,
     /// Forward the client's inbound `Host` (HTTP/1.1) / `:authority` (HTTP/2)
     /// to the upstream unchanged, instead of rewriting it to the upstream
     /// member's address. Equivalent to nginx `proxy_set_header Host $http_host`
@@ -893,8 +958,8 @@ pub fn load(path: &Path) -> Result<Config> {
 /// `Some(section)` naming the first changed immutable section, or `None` when
 /// only hot-reloadable sections differ.
 ///
-/// Hot-reloadable (a reload swaps these in place): `routes`, `auth`, and
-/// `forwarded`. Everything else requires a restart, because it is baked into a
+/// Hot-reloadable (a reload swaps these in place): `routes`, `auth`,
+/// `authorizers`, and `forwarded`. Everything else requires a restart, because it is baked into a
 /// bound socket, a TLS acceptor, a hyper client, or a once-initialised
 /// subscriber: `mode`, `listener`, `admin`, `shutdown`, `logging`, `egress`,
 /// `nats`, and upstream pool *shape* (every per-pool field except `members`).
@@ -1003,6 +1068,78 @@ pub fn expand_env(input: &str) -> Result<String> {
     Ok(out)
 }
 
+/// Headers an authorizer may never inject: hop-by-hop, framing, routing, and
+/// identity/forwarding headers quik itself owns. Compared case-insensitively.
+const AUTHORIZER_FORBIDDEN_INJECT: &[&str] = &[
+    "connection",
+    "keep-alive",
+    "proxy-connection",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+    "host",
+    "content-length",
+    "content-type",
+    "content-encoding",
+    "authorization",
+    "cookie",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+    "forwarded",
+    "x-request-id",
+    "request-id",
+    "traceparent",
+];
+
+fn validate_authorizers(authorizers: &[AuthorizerConfig]) -> Result<()> {
+    let mut names = HashSet::new();
+    for a in authorizers {
+        if !names.insert(a.name.as_str()) {
+            anyhow::bail!("duplicate authorizer name '{}'", a.name);
+        }
+        let ctx = || format!("authorizer '{}'", a.name);
+        let uri: http::Uri = a
+            .url
+            .parse()
+            .with_context(|| format!("{}: invalid url '{}'", ctx(), a.url))?;
+        match uri.scheme_str() {
+            Some("http") | Some("https") => {}
+            _ => anyhow::bail!("{}: url must be http:// or https://", ctx()),
+        }
+        if uri.host().is_none() {
+            anyhow::bail!("{}: url has no host", ctx());
+        }
+        if a.timeout_ms == 0 {
+            anyhow::bail!("{}: timeout_ms must be > 0", ctx());
+        }
+        for h in &a.forward_headers {
+            http::HeaderName::try_from(h.as_str())
+                .with_context(|| format!("{}: invalid forward_headers entry '{h}'", ctx()))?;
+        }
+        for h in &a.inject_headers {
+            http::HeaderName::try_from(h.as_str())
+                .with_context(|| format!("{}: invalid inject_headers entry '{h}'", ctx()))?;
+            if AUTHORIZER_FORBIDDEN_INJECT
+                .iter()
+                .any(|f| f.eq_ignore_ascii_case(h))
+            {
+                anyhow::bail!("{}: header '{h}' cannot be injected", ctx());
+            }
+        }
+        if a.tls.cert_path.is_some() != a.tls.key_path.is_some() {
+            anyhow::bail!(
+                "{}: tls.cert_path and tls.key_path must be set together",
+                ctx()
+            );
+        }
+    }
+    Ok(())
+}
+
 fn validate(cfg: &Config) -> Result<()> {
     // quik must do *something*: serve inbound (`[listener]`) or filter outbound
     // (`[egress]`). A config with neither would bind only the admin port.
@@ -1024,6 +1161,7 @@ fn validate(cfg: &Config) -> Result<()> {
     if auth_names.len() != cfg.auth.len() {
         anyhow::bail!("duplicate auth block names");
     }
+    validate_authorizers(&cfg.authorizers)?;
     // Fail fast on a malformed trusted-proxy entry rather than silently
     // trusting nobody at runtime (same parsing as headers::ForwardedPolicy).
     for entry in &cfg.forwarded.trusted_proxies {
@@ -1042,6 +1180,35 @@ fn validate(cfg: &Config) -> Result<()> {
             && !auth_names.contains(a.as_str())
         {
             anyhow::bail!("route '{}' references unknown auth '{}'", r.summary(), a);
+        }
+        if let Some(z) = &r.authorizer {
+            let Some(authz) = cfg.authorizers.iter().find(|x| &x.name == z) else {
+                anyhow::bail!(
+                    "route '{}' references unknown authorizer '{}'",
+                    r.summary(),
+                    z
+                );
+            };
+            // The JWT block's injected headers are on the request by the time
+            // the authorizer runs; an overlap would trip the authorizer's
+            // spoof check on quik's own header.
+            if let Some(a) = &r.auth
+                && let Some(block) = cfg.auth.iter().find(|b| &b.name == a)
+                && let Some(clash) = block.inject_headers.iter().find(|m| {
+                    authz
+                        .inject_headers
+                        .iter()
+                        .any(|h| h.eq_ignore_ascii_case(&m.header))
+                })
+            {
+                anyhow::bail!(
+                    "route '{}': header '{}' is injected by both auth '{}' and authorizer '{}'",
+                    r.summary(),
+                    clash.header,
+                    a,
+                    z
+                );
+            }
         }
         if r.path_exact.is_some() && r.path_prefix.is_some() {
             anyhow::bail!(
@@ -1359,6 +1526,80 @@ bind = "127.0.0.1:9090"
         let cfg: Config = toml::from_str(&s).unwrap();
         let err = validate(&cfg).unwrap_err();
         assert!(err.to_string().contains("mtls"), "{err}");
+    }
+
+    fn authorizer_cfg(authz: &str, route_extra: &str) -> String {
+        format!(
+            "{MIN}\n[[upstreams]]\nname=\"a\"\nmembers=[{{address=\"127.0.0.1:1\"}}]\n\
+             [[authorizers]]\nname=\"z\"\n{authz}\n\
+             [[routes]]\npath_prefix=\"/x\"\nupstream=\"a\"\nauthorizer=\"z\"\n{route_extra}\n"
+        )
+    }
+
+    #[test]
+    fn parses_authorizer_with_defaults() {
+        let cfg: Config = toml::from_str(&authorizer_cfg(
+            "url=\"https://authz.internal/v1\"\ninject_headers=[\"x-user-id\"]",
+            "",
+        ))
+        .unwrap();
+        validate(&cfg).unwrap();
+        let z = &cfg.authorizers[0];
+        assert_eq!(z.timeout_ms, 1000);
+        assert_eq!(z.on_error, AuthorizerOnError::Deny);
+        assert_eq!(cfg.routes[0].authorizer.as_deref(), Some("z"));
+    }
+
+    #[test]
+    fn rejects_bad_authorizer_config() {
+        for (authz, route_extra, want) in [
+            ("url=\"ftp://x/\"", "", "http:// or https://"),
+            ("url=\"http://x/\"\ntimeout_ms=0", "", "timeout_ms"),
+            (
+                "url=\"http://x/\"\ninject_headers=[\"Host\"]",
+                "",
+                "cannot be injected",
+            ),
+            (
+                "url=\"http://x/\"\ninject_headers=[\"x-forwarded-for\"]",
+                "",
+                "cannot be injected",
+            ),
+            (
+                "url=\"http://x/\"\ntls={cert_path=\"c.pem\"}",
+                "",
+                "set together",
+            ),
+        ] {
+            let cfg: Config = toml::from_str(&authorizer_cfg(authz, route_extra)).unwrap();
+            let err = validate(&cfg).unwrap_err().to_string();
+            assert!(err.contains(want), "{authz}: expected '{want}' in '{err}'");
+        }
+    }
+
+    #[test]
+    fn rejects_route_with_unknown_authorizer() {
+        let s = format!(
+            "{MIN}\n[[upstreams]]\nname=\"a\"\nmembers=[{{address=\"127.0.0.1:1\"}}]\n\
+             [[routes]]\npath_prefix=\"/x\"\nupstream=\"a\"\nauthorizer=\"nope\"\n"
+        );
+        let cfg: Config = toml::from_str(&s).unwrap();
+        let err = validate(&cfg).unwrap_err().to_string();
+        assert!(err.contains("unknown authorizer"), "{err}");
+    }
+
+    #[test]
+    fn rejects_header_injected_by_both_auth_and_authorizer() {
+        let s = format!(
+            "{MIN}\n[[upstreams]]\nname=\"a\"\nmembers=[{{address=\"127.0.0.1:1\"}}]\n\
+             [[auth]]\nname=\"j\"\njwks_url=\"http://x/\"\n\
+             inject_headers=[{{claim=\"sub\",header=\"x-user-id\"}}]\n\
+             [[authorizers]]\nname=\"z\"\nurl=\"http://y/\"\ninject_headers=[\"X-User-Id\"]\n\
+             [[routes]]\npath_prefix=\"/x\"\nupstream=\"a\"\nauth=\"j\"\nauthorizer=\"z\"\n"
+        );
+        let cfg: Config = toml::from_str(&s).unwrap();
+        let err = validate(&cfg).unwrap_err().to_string();
+        assert!(err.contains("injected by both"), "{err}");
     }
 
     #[test]

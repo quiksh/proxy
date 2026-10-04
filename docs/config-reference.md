@@ -12,7 +12,7 @@ example deployments, see the scenario guides:
 - [Forward proxy](forward-proxy.md)
 - [Admin API](admin-api.md)
 
-> **Reloadable at runtime.** `[[routes]]`, `[[auth]]`, and `[forwarded]` can be
+> **Reloadable at runtime.** `[[routes]]`, `[[auth]]`, `[[authorizers]]` and `[forwarded]` can be
 > edited and applied to a running proxy without a restart - send `SIGHUP` or
 > `POST /admin/config/reload`. Every other section (listener, admin, egress,
 > `mode`, `[shutdown]`, `[logging]`, and upstream pool *shape*) is fixed at boot;
@@ -347,6 +347,7 @@ Ties broken by config order.
 | `timeout_ms`     | u64     | Upper bound on upstream response time. 504 on expiry.                 |
 | `max_body_bytes` | u64     | Cap inbound body via Content-Length pre-check. 413 if exceeded.       |
 | `auth`           | string  | Name of an `[[auth]]` block.                                          |
+| `authorizer`     | string  | Name of an `[[authorizers]]` block. Runs after `auth` when both are set. |
 | `preserve_host`  | bool    | Forward the client's `Host` to the upstream unchanged instead of rewriting it to the member's address. Like nginx `proxy_set_header Host $http_host` / Apache `ProxyPreserveHost On`. Needed by backends that check Host/Origin (e.g. Grafana). Default `false`. Applies to HTTP/1.1 upstreams; HTTP/2 derives `:authority` from the member address. |
 
 ### Required
@@ -406,6 +407,101 @@ Value coercion when injecting:
 | array of strings  | comma-joined                       |
 | array mixed / object | JSON-encoded                    |
 | null / missing (and not required) | header dropped     |
+
+## `[[authorizers]]`
+
+An external HTTP authoriser, consulted on every request to a route with
+`authorizer = "<name>"`. Use it where you would use an AWS API Gateway Lambda
+authoriser, but with a long-running internal service on warm keep-alive
+connections, so there are no cold starts.
+
+```toml
+[[authorizers]]
+name            = "internal"
+url             = "https://authz.internal:8443/v1/authorize"
+timeout_ms      = 200
+forward_headers = ["authorization", "x-api-key"]
+inject_headers  = ["x-user-id", "x-tenant-id", "x-scopes"]
+on_error        = "deny"
+tls             = { ca_path = "/etc/quik/internal-ca.pem" }
+
+[[routes]]
+path_prefix = "/api"
+auth        = "main"       # optional: JWT is checked first, locally
+authorizer  = "internal"   # then the authoriser, which also gets the claims
+upstream    = "api"
+```
+
+| Field             | Type             | Default  | Notes                                                                 |
+|-------------------|------------------|----------|-----------------------------------------------------------------------|
+| `name`            | string           | required | Referenced from routes.                                               |
+| `url`             | URL              | required | `http://` or `https://`. Receives a `POST` per request.               |
+| `timeout_ms`      | u64              | `1000`   | Covers the whole call. If it expires, quik treats it as an authoriser error. |
+| `forward_headers` | array of strings | `[]`     | Inbound headers copied into the request quik sends. No headers are sent unless listed here. |
+| `inject_headers`  | array of strings | `[]`     | Headers the authoriser may set upstream. Each one is also **reserved** (see below). |
+| `on_error`        | `deny` \| `allow` | `deny`   | What happens when the authoriser gives no answer. `deny` returns 503; `allow` forwards the request without injected headers. |
+| `tls.ca_path`     | path             | unset    | Extra PEM CA bundle to trust, on top of the public roots.             |
+| `tls.cert_path` / `tls.key_path` | path | unset | Client certificate and key for mTLS to the authoriser. Set both or neither. |
+
+### The request quik sends
+
+`POST <url>` with `content-type: application/json`:
+
+```json
+{
+  "version": "1",
+  "request_id": "6f1c…",
+  "route": "/api",
+  "source_ip": "203.0.113.7",
+  "method": "POST",
+  "host": "api.example.com",
+  "path": "/api/orders",
+  "query": "limit=5",
+  "headers": { "authorization": "Bearer …" },
+  "claims": { "sub": "user-42", "tenant_id": "t_1" }
+}
+```
+
+- `path` is the path the client sent, before any `strip_prefix`.
+- `query` is `null` when the request has no query string.
+- `headers` only contains the names listed in `forward_headers`, in lower case. When a header appears more than once, its values are joined with `, `.
+- `claims` is only present when the route also has an `auth` block. It holds the verified JWT claims.
+- `source_ip` is the immediate peer. Behind a load balancer, forward `x-forwarded-for`, but only rely on it from peers listed in `trusted_proxies`.
+
+### Response contract
+
+The authoriser's HTTP status is the decision.
+
+| Authoriser response | quik does |
+|---|---|
+| **2xx**, empty body (e.g. `204`) | Allows the request. |
+| **2xx**, JSON body `{"headers": {"x-user-id": "u_1"}}` | Allows the request and sets those headers on the upstream request. Names not in `inject_headers` are dropped with a warning. A value that isn't a valid header string counts as an error. |
+| **4xx** | Denies the request. The status and body are sent to the client, plus `content-type` and `www-authenticate` if set. Other response headers are dropped. |
+| **Anything else** (3xx, 5xx, timeout, connection error, a 2xx body that isn't JSON) | Counts as an error and is handled by `on_error`. Redirects aren't followed. |
+
+Response bodies are capped at 64 KiB. A larger allow body counts as an error; a larger deny body is dropped and the status is still sent.
+
+### Reserved and forbidden headers
+
+Every `inject_headers` name is **reserved**. If an inbound request already
+carries one (in any letter case), quik rejects it with 403
+(`outcome="spoofed_header"`) without calling the authoriser.
+
+Some headers can't be listed in `inject_headers` because quik controls them:
+hop-by-hop headers, `host`, `content-length`, `content-type`,
+`content-encoding`, `authorization`, `cookie`, `x-forwarded-*`, `forwarded`,
+`x-request-id`/`request-id` and `traceparent`. A route can't use an `auth`
+block and an authoriser that inject the same header; config validation
+rejects the overlap.
+
+### Metrics
+
+| Metric                              | Type      | Labels                    |
+|-------------------------------------|-----------|---------------------------|
+| `quik_authorizer_total`             | counter   | `authorizer`, `outcome` (`allow`, `deny`, `error_denied`, `error_allowed`, `spoofed_header`) |
+| `quik_authorizer_duration_seconds`  | histogram | `authorizer`              |
+
+WebSocket upgrades go through `auth` and the authoriser in the same way as other requests.
 
 ## `[egress]`
 

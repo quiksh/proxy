@@ -276,6 +276,8 @@ Metrics on the admin listener at `/metrics`. The interesting ones:
 | `quik_pool_members_total`             | gauge   | `pool`, `state`     |
 | `quik_active_health_check_total`      | counter | `pool`, `member`, `result` |
 | `quik_auth_total`                     | counter | `block`, `outcome`  |
+| `quik_authorizer_total`               | counter | `authorizer`, `outcome` |
+| `quik_authorizer_duration_seconds`    | histogram | `authorizer`      |
 
 Logs: one access event per completed request at `target = quik::access`,
 INFO level, carrying `method`, `path`, `peer`, `request_id`, `status`,

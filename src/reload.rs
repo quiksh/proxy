@@ -1,7 +1,7 @@
 //! Hot config reload.
 //!
 //! Re-reads the config file and atomically swaps the hot-reloadable subsystems
-//! (routes, `[[auth]]` blocks, and the `[forwarded]` policy) without restarting
+//! (routes, `[[auth]]` and `[[authorizers]]` blocks, and the `[forwarded]` policy) without restarting
 //! the process. Each swap is lock-free for readers (the proxy hot path),
 //! reusing the same `ArcSwap` handles the listener already serves from, so an
 //! in-flight request finishes on the config it started with and the next
@@ -77,6 +77,7 @@ impl std::error::Error for ReloadError {}
 pub struct ReloadOutcome {
     pub routes: usize,
     pub auth_blocks: usize,
+    pub authorizers: usize,
 }
 
 struct Inner {
@@ -181,6 +182,7 @@ impl ReloadHandle {
                 tracing::info!(
                     routes = outcome.routes,
                     auth_blocks = outcome.auth_blocks,
+                    authorizers = outcome.authorizers,
                     path = %self.inner.path.display(),
                     "config reloaded"
                 );
@@ -214,6 +216,7 @@ impl ReloadHandle {
         let outcome = ReloadOutcome {
             routes: new_cfg.routes.len(),
             auth_blocks: new_cfg.auth.len(),
+            authorizers: new_cfg.authorizers.len(),
         };
 
         // Swap the live handles. Each flips atomically and is lock-free for
