@@ -1786,6 +1786,80 @@ async fn websocket_upgrade_proxied_with_bidirectional_echo() {
     ws.close(None).await.unwrap();
 }
 
+/// SECURITY: a route's `[[auth]]` block must apply to WebSocket upgrades too -
+/// regression test for upgrades bypassing JWT validation.
+#[tokio::test]
+async fn websocket_upgrade_enforces_route_auth() {
+    use std::sync::Arc;
+    use tokio_tungstenite::Connector;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let signer = common::TestJwtSigner::with_kid("k1");
+    let (jwks_addr, _jwks_body) = common::spawn_jwks_server(signer.jwks_json());
+    let backend = Backend::spawn_ws_echo("ws-a").await;
+    let proxy = common::spawn_proxy_with_auth(
+        ProxySpec {
+            pools: vec![common::Backends::http("p", vec![backend.addr])],
+            routes: vec![RouteConfig {
+                path_prefix: Some("/".to_string()),
+                auth: Some("main".to_string()),
+                upstream: "p".to_string(),
+                ..Default::default()
+            }],
+        },
+        vec![auth_block("main", jwks_addr)],
+    )
+    .await;
+
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let mut tls_config = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(TestNoVerifier))
+        .with_no_client_auth();
+    tls_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let tls = Arc::new(tls_config);
+    let ws_url = format!("wss://localhost:{}/echo", proxy.addr.port());
+
+    // No token → the handshake is rejected with 401 and never reaches upstream.
+    let err = tokio_tungstenite::connect_async_tls_with_config(
+        ws_url.as_str(),
+        None,
+        false,
+        Some(Connector::Rustls(tls.clone())),
+    )
+    .await
+    .expect_err("upgrade without token must be rejected");
+    match err {
+        tokio_tungstenite::tungstenite::Error::Http(resp) => {
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED)
+        }
+        other => panic!("expected HTTP 401, got {other:?}"),
+    }
+    assert!(
+        backend.calls().is_empty(),
+        "rejected upgrade reached backend"
+    );
+
+    // Valid token → upgrade proceeds.
+    let mut req = ws_url.as_str().into_client_request().unwrap();
+    req.headers_mut().insert(
+        "authorization",
+        format!("Bearer {}", signer.sign(valid_claims()))
+            .parse()
+            .unwrap(),
+    );
+    let (mut ws, resp) = tokio_tungstenite::connect_async_tls_with_config(
+        req,
+        None,
+        false,
+        Some(Connector::Rustls(tls)),
+    )
+    .await
+    .expect("authed ws connect");
+    assert_eq!(resp.status(), StatusCode::SWITCHING_PROTOCOLS);
+    ws.close(None).await.unwrap();
+}
+
 // Minimal cert verifier used only by the WS test. The general-purpose
 // h2 helper has its own; duplicate here to keep the test self-contained.
 #[derive(Debug)]

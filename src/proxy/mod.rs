@@ -359,58 +359,11 @@ async fn forward_inner(
     };
 
     // ── auth module (per-route JWT validation) ────────────────────────────────
-    if let Some(name) = &auth_name {
-        let Some(validator) = auth.get(name) else {
-            tracing::error!(auth = %name, "route references missing auth - config drift");
-            metrics::counter!("quik_proxy_errors_total", "kind" => "auth_misconfig").increment(1);
-            record_terminal(&route_label, 500, start, None);
-            return synth(StatusCode::INTERNAL_SERVER_ERROR, "auth misconfigured\n");
-        };
-        // Take an owned copy of the token so the immutable borrow on parts
-        // doesn't outlive the call - validate_and_inject needs a mutable
-        // borrow on the same HeaderMap to write the injected headers.
-        let token = match extract_bearer_token(&parts.headers).map(|t| t.to_owned()) {
-            Some(t) => t,
-            None => {
-                metrics::counter!("quik_auth_total", "auth" => name.clone(), "outcome" => "missing_token").increment(1);
-                record_terminal(&route_label, 401, start, None);
-                return unauthorized("missing bearer token");
-            }
-        };
-        match validator
-            .validate_and_inject(&token, &mut parts.headers)
-            .await
-        {
-            Ok(()) => {
-                metrics::counter!("quik_auth_total", "auth" => name.clone(), "outcome" => "ok")
-                    .increment(1);
-            }
-            Err(e) => {
-                let outcome = match &e {
-                    AuthError::MissingToken => "missing_token",
-                    AuthError::MalformedToken => "malformed",
-                    AuthError::MissingKid => "missing_kid",
-                    AuthError::UnknownKid => "unknown_kid",
-                    AuthError::DisallowedAlgorithm => "disallowed_alg",
-                    AuthError::InvalidSignature => "bad_signature",
-                    AuthError::InvalidClaims(_) => "bad_claims",
-                    AuthError::SpoofedHeader(_) => "spoofed_header",
-                    AuthError::JwksFetch(_) => "jwks_fetch",
-                    AuthError::Other(_) => "other",
-                };
-                metrics::counter!("quik_auth_total", "auth" => name.clone(), "outcome" => outcome)
-                    .increment(1);
-                tracing::debug!(auth = %name, error = %e, "auth rejected");
-                let status = match e {
-                    AuthError::InvalidClaims(_) | AuthError::SpoofedHeader(_) => {
-                        StatusCode::FORBIDDEN
-                    }
-                    _ => StatusCode::UNAUTHORIZED,
-                };
-                record_terminal(&route_label, status.as_u16(), start, None);
-                return unauthorized_with_status(status, "auth rejected");
-            }
-        }
+    if let Some(name) = &auth_name
+        && let Err(resp) =
+            apply_route_auth(auth, name, &mut parts.headers, &route_label, start).await
+    {
+        return resp;
     }
 
     // ── max_body_bytes module ────────────────────────────────────────────────
@@ -839,7 +792,7 @@ async fn handle_ws_upgrade(
     mut req: Request<Incoming>,
     routing: &SharedRoutingTable,
     upstreams: &Pool,
-    _auth: &SharedAuthRegistry,
+    auth: &SharedAuthRegistry,
     ctx: RequestContext,
     ws_ctx: WsContext,
     start: Instant,
@@ -870,15 +823,28 @@ async fn handle_ws_upgrade(
     let path = req.uri().path();
     let method = req.method().clone();
 
-    let (route_label, pool_name) = {
+    let (route_label, pool_name, auth_name) = {
         let table = routing.load();
         let Some(route) = table.match_request(host, &method, path) else {
             let none_label: Arc<str> = Arc::from("_none");
             record_terminal(&none_label, 404, start, None);
             return synth(StatusCode::NOT_FOUND, "no route\n");
         };
-        (route.label.clone(), route.upstream_pool.clone())
+        (
+            route.label.clone(),
+            route.upstream_pool.clone(),
+            route.auth.clone(),
+        )
     };
+
+    // SECURITY: route auth applies to upgrades exactly as to plain requests -
+    // without this an `Upgrade: websocket` header would skip the JWT check.
+    if let Some(name) = &auth_name
+        && let Err(resp) =
+            apply_route_auth(auth, name, req.headers_mut(), &route_label, start).await
+    {
+        return resp;
+    }
 
     let pool = match upstreams.get(&pool_name) {
         Some(p) => p,
@@ -1067,6 +1033,67 @@ async fn handle_ws_upgrade(
     let (parts, body) = upstream_resp.into_parts();
     record_terminal(&route_label, 101, start, Some(&target_name));
     Response::from_parts(parts, into_proxy_body(body))
+}
+
+/// Run the route's `[[auth]]` block against the inbound headers: validate the
+/// bearer token and write any claim-mapped headers. On rejection, records the
+/// terminal access-log line and returns the response to send. Shared by the
+/// plain forwarding path and the WebSocket upgrade path so an `Upgrade` request
+/// can't bypass route auth.
+async fn apply_route_auth(
+    auth: &SharedAuthRegistry,
+    name: &str,
+    headers: &mut HeaderMap,
+    route_label: &Arc<str>,
+    start: Instant,
+) -> Result<(), Response<ProxyBody>> {
+    let Some(validator) = auth.get(name) else {
+        tracing::error!(auth = %name, "route references missing auth - config drift");
+        metrics::counter!("quik_proxy_errors_total", "kind" => "auth_misconfig").increment(1);
+        record_terminal(route_label, 500, start, None);
+        return Err(synth(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "auth misconfigured\n",
+        ));
+    };
+    // Take an owned copy of the token so the immutable borrow on headers
+    // doesn't outlive the call - validate_and_inject needs a mutable borrow on
+    // the same HeaderMap to write the injected headers.
+    let Some(token) = extract_bearer_token(headers).map(|t| t.to_owned()) else {
+        metrics::counter!("quik_auth_total", "auth" => name.to_owned(), "outcome" => "missing_token").increment(1);
+        record_terminal(route_label, 401, start, None);
+        return Err(unauthorized("missing bearer token"));
+    };
+    match validator.validate_and_inject(&token, headers).await {
+        Ok(()) => {
+            metrics::counter!("quik_auth_total", "auth" => name.to_owned(), "outcome" => "ok")
+                .increment(1);
+            Ok(())
+        }
+        Err(e) => {
+            let outcome = match &e {
+                AuthError::MissingToken => "missing_token",
+                AuthError::MalformedToken => "malformed",
+                AuthError::MissingKid => "missing_kid",
+                AuthError::UnknownKid => "unknown_kid",
+                AuthError::DisallowedAlgorithm => "disallowed_alg",
+                AuthError::InvalidSignature => "bad_signature",
+                AuthError::InvalidClaims(_) => "bad_claims",
+                AuthError::SpoofedHeader(_) => "spoofed_header",
+                AuthError::JwksFetch(_) => "jwks_fetch",
+                AuthError::Other(_) => "other",
+            };
+            metrics::counter!("quik_auth_total", "auth" => name.to_owned(), "outcome" => outcome)
+                .increment(1);
+            tracing::debug!(auth = %name, error = %e, "auth rejected");
+            let status = match e {
+                AuthError::InvalidClaims(_) | AuthError::SpoofedHeader(_) => StatusCode::FORBIDDEN,
+                _ => StatusCode::UNAUTHORIZED,
+            };
+            record_terminal(route_label, status.as_u16(), start, None);
+            Err(unauthorized_with_status(status, "auth rejected"))
+        }
+    }
 }
 
 fn unauthorized(msg: &'static str) -> Response<ProxyBody> {
