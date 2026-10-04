@@ -13,14 +13,21 @@
 //! - **anything else** (3xx, 5xx, timeout, connect error, malformed 2xx body)
 //!   - the authorizer gave no verdict; the caller applies `on_error`.
 //!
+//! With `include_body`, the caller buffers the request body (capped) and it
+//! rides in the envelope as `body` - verbatim when UTF-8, else base64 with
+//! `is_base64_encoded: true`. The same bytes are then forwarded upstream.
+//!
 //! The authorizer client keeps pooled keep-alive connections, so the steady
 //! state cost is one round trip on a warm connection.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use bytes::Bytes;
 use http::header::{CONTENT_TYPE, USER_AGENT, WWW_AUTHENTICATE};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, Uri};
@@ -76,6 +83,9 @@ pub struct HttpAuthorizer {
     pub name: String,
     pub metrics: AuthorizerMetrics,
     pub on_error: AuthorizerOnError,
+    /// `Some(cap)` when the request body is sent (`include_body`).
+    body_limit: Option<u64>,
+    body_timeout: Duration,
     uri: Uri,
     timeout: Duration,
     forward_headers: Vec<HeaderName>,
@@ -93,6 +103,8 @@ pub struct AuthzRequest<'a> {
     pub request_id: &'a str,
     /// Verified JWT claims, when the route also has an `auth` block.
     pub claims: Option<&'a Claims>,
+    /// The buffered request body, when `include_body` is set.
+    pub body: Option<&'a Bytes>,
 }
 
 #[derive(Debug)]
@@ -120,6 +132,10 @@ struct Envelope<'a> {
     headers: BTreeMap<&'a str, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     claims: Option<&'a Claims>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body: Option<Cow<'a, str>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_base64_encoded: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -140,12 +156,25 @@ impl HttpAuthorizer {
             name: cfg.name.clone(),
             metrics: AuthorizerMetrics::new(&cfg.name),
             on_error: cfg.on_error,
+            body_limit: cfg.include_body.then_some(cfg.max_body_bytes),
+            body_timeout: Duration::from_millis(cfg.body_timeout_ms),
             uri: cfg.url.parse().context("parsing authorizer url")?,
             timeout: Duration::from_millis(cfg.timeout_ms),
             forward_headers: parse_names(&cfg.forward_headers)?,
             inject_headers: parse_names(&cfg.inject_headers)?,
             client,
         })
+    }
+
+    /// The body cap when this authorizer wants the request body, else `None`
+    /// (the body streams to the upstream untouched).
+    pub fn body_limit(&self) -> Option<u64> {
+        self.body_limit
+    }
+
+    /// Deadline for buffering the request body (`body_timeout_ms`).
+    pub fn body_timeout(&self) -> Duration {
+        self.body_timeout
     }
 
     /// SECURITY: the first `inject_headers` name present on the inbound
@@ -232,6 +261,16 @@ impl HttpAuthorizer {
             .get(http::header::HOST)
             .and_then(|h| h.to_str().ok())
             .or_else(|| req.uri.authority().map(|a| a.as_str()));
+        // Text goes verbatim; anything else - invalid UTF-8, or control
+        // characters JSON would escape as 6-byte `\u00XX` - is base64, so the
+        // envelope stays within ~4/3 of max_body_bytes.
+        let (body, is_base64_encoded) = match req.body {
+            Some(b) => match std::str::from_utf8(b) {
+                Ok(s) if !has_escaped_controls(b) => (Some(Cow::Borrowed(s)), Some(false)),
+                _ => (Some(Cow::Owned(BASE64.encode(b))), Some(true)),
+            },
+            None => (None, None),
+        };
         Envelope {
             version: ENVELOPE_VERSION,
             request_id: req.request_id,
@@ -243,6 +282,8 @@ impl HttpAuthorizer {
             query: req.uri.query(),
             headers,
             claims: req.claims,
+            body,
+            is_base64_encoded,
         }
     }
 
@@ -281,6 +322,13 @@ impl HttpAuthorizer {
     }
 }
 
+/// Whether `b` has bytes JSON would escape as `\u00XX` (C0 controls other than
+/// tab / LF / CR, which get short escapes, plus DEL).
+fn has_escaped_controls(b: &[u8]) -> bool {
+    b.iter()
+        .any(|&c| (c < 0x20 && !matches!(c, b'\t' | b'\n' | b'\r')) || c == 0x7f)
+}
+
 async fn read_capped<B>(body: B) -> Result<Bytes>
 where
     B: hyper::body::Body<Data = Bytes>,
@@ -305,6 +353,9 @@ mod tests {
             forward_headers: vec!["authorization".into()],
             inject_headers: inject.iter().map(|s| s.to_string()).collect(),
             on_error: AuthorizerOnError::Deny,
+            include_body: false,
+            max_body_bytes: 1024,
+            body_timeout_ms: 1000,
             tls: Default::default(),
         };
         HttpAuthorizer::build(&cfg, super::super::client::build_jwks_client_skip_verify()).unwrap()
@@ -379,6 +430,7 @@ mod tests {
             route: "/v1",
             request_id: "rid",
             claims: None,
+            body: None,
         };
         let v = serde_json::to_value(a.envelope(&req)).unwrap();
         assert_eq!(v["method"], "POST");
@@ -389,5 +441,40 @@ mod tests {
         assert_eq!(v["headers"]["authorization"], "Bearer t");
         assert!(v["headers"].get("cookie").is_none());
         assert!(v.get("claims").is_none());
+        assert!(v.get("body").is_none());
+        assert!(v.get("is_base64_encoded").is_none());
+    }
+
+    #[test]
+    fn envelope_body_is_verbatim_utf8_or_base64() {
+        let a = authorizer(&[]);
+        let headers = HeaderMap::new();
+        let uri: Uri = "/".parse().unwrap();
+        let encode = |body: &Bytes| {
+            let req = AuthzRequest {
+                method: &Method::POST,
+                uri: &uri,
+                headers: &headers,
+                source_ip: "10.0.0.1".parse().unwrap(),
+                route: "/",
+                request_id: "rid",
+                claims: None,
+                body: Some(body),
+            };
+            serde_json::to_value(a.envelope(&req)).unwrap()
+        };
+        let v = encode(&Bytes::from_static(br#"{"amount":5}"#));
+        assert_eq!(v["body"], r#"{"amount":5}"#);
+        assert_eq!(v["is_base64_encoded"], false);
+        let v = encode(&Bytes::from_static(&[0xff, 0x00, 0x10]));
+        assert_eq!(v["body"], "/wAQ");
+        assert_eq!(v["is_base64_encoded"], true);
+        // Valid UTF-8 but NUL-heavy: base64 rather than 6x `\u0000` escapes.
+        let v = encode(&Bytes::from_static(b"a\x00b"));
+        assert_eq!(v["is_base64_encoded"], true);
+        // Ordinary text with newlines/tabs stays verbatim.
+        let v = encode(&Bytes::from_static(b"line1\n\tline2\r\n"));
+        assert_eq!(v["body"], "line1\n\tline2\r\n");
+        assert_eq!(v["is_base64_encoded"], false);
     }
 }

@@ -439,6 +439,9 @@ upstream    = "api"
 | `timeout_ms`      | u64              | `1000`   | Covers the whole call. If it expires, quik treats it as an authoriser error. |
 | `forward_headers` | array of strings | `[]`     | Inbound headers copied into the request quik sends. No headers are sent unless listed here. |
 | `inject_headers`  | array of strings | `[]`     | Headers the authoriser may set upstream. Each one is also **reserved** (see below). |
+| `include_body`    | bool             | `false`  | Read the whole request body into memory and send it in `body`. Without it, request bodies are forwarded as they arrive, without being held in memory. |
+| `max_body_bytes`  | u64              | `65536`  | Largest body accepted when `include_body` is on; bigger bodies get 413. Can't exceed 1 MiB. If the route's own `max_body_bytes` is lower, that limit applies. |
+| `body_timeout_ms` | u64              | `10000`  | With `include_body`, the time a client has to finish sending its body. A body still arriving after this gets 408. |
 | `on_error`        | `deny` \| `allow` | `deny`   | What happens when the authoriser gives no answer. `deny` returns 503; `allow` forwards the request without injected headers. |
 | `tls.ca_path`     | path             | unset    | Extra PEM CA bundle to trust, on top of the public roots.             |
 | `tls.cert_path` / `tls.key_path` | path | unset | Client certificate and key for mTLS to the authoriser. Set both or neither. |
@@ -466,6 +469,7 @@ upstream    = "api"
 - `query` is `null` when the request has no query string.
 - `headers` only contains the names listed in `forward_headers`, in lower case. When a header appears more than once, its values are joined with `, `.
 - `claims` is only present when the route also has an `auth` block. It holds the verified JWT claims.
+- `body` and `is_base64_encoded` are only present with `include_body`. A UTF-8 text body is sent as is (e.g. a JSON string you can parse again). Anything else, including UTF-8 containing control characters other than tab, LF and CR, is base64-encoded and `is_base64_encoded` is `true`. That keeps the request to the authoriser at most about 4/3 of `max_body_bytes`. An empty body is `""`. This matches API Gateway's `body` / `isBase64Encoded`.
 - `source_ip` is the immediate peer. Behind a load balancer, forward `x-forwarded-for`, but only rely on it from peers listed in `trusted_proxies`.
 
 ### Response contract
@@ -503,6 +507,30 @@ rejects the overlap.
 | `quik_authorizer_duration_seconds`  | histogram | `authorizer`              |
 
 WebSocket upgrades go through `auth` and the authoriser in the same way as other requests.
+
+### Request bodies (`include_body`)
+
+To decide based on the payload (amounts, resource IDs, GraphQL operation
+names and so on), set `include_body = true`. quik then handles the request
+like this:
+
+1. Checks the JWT, if `auth` is set. A request without a valid token is
+   rejected before its body is read.
+2. Rejects with 413 if the declared `Content-Length` is over the cap. A body
+   sent without a length (chunked) gets 413 as soon as it goes over the cap.
+3. Calls the authoriser with the body included.
+4. On allow, forwards **the same bytes** to the upstream.
+
+If the body hasn't fully arrived within `body_timeout_ms`, the client gets
+408, so a slow sender can't hold a buffer open.
+
+Request **trailers are dropped** on these routes, because the body is
+forwarded as a single block. Don't use `include_body` on routes that rely on
+trailers, such as gRPC.
+
+Only routes whose authoriser uses `include_body` hold request bodies in
+memory. Each in-flight request on those routes uses up to `max_body_bytes`,
+so keep the limit low. That's why it's capped at 1 MiB.
 
 ## `[egress]`
 
