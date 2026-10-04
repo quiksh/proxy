@@ -267,7 +267,73 @@ pub struct AuthorizerConfig {
     pub body_timeout_ms: u64,
     #[serde(default)]
     pub tls: AuthorizerTlsConfig,
+    /// Per-process verdict cache. Off unless `ttl_seconds > 0`.
+    #[serde(default)]
+    pub cache: AuthorizerCacheConfig,
 }
+
+/// Verdict cache for an authorizer. Each quik process keeps its own (no
+/// cross-instance sharing). Allows (with their injected headers) and, unless
+/// `cache_denies = false`, 4xx denies are cached; authorizer errors never are.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthorizerCacheConfig {
+    /// Where verdicts are stored. Only `memory` (per process) today; the
+    /// backend boundary exists so shared stores (NATS KV, Redis) can follow.
+    #[serde(default)]
+    pub backend: CacheBackend,
+    /// Entry lifetime, 0-900 seconds (15 minutes). 0 disables the cache. An
+    /// authorizer response can shorten it with `Cache-Control: max-age=N` or
+    /// opt out with `no-store`.
+    #[serde(default)]
+    pub ttl_seconds: u64,
+    /// What identifies "the same request". Unset (the default) keys on
+    /// everything the authorizer sees except `request_id`: method, host, path,
+    /// query, source_ip, forwarded headers, and claims - so a cached verdict is
+    /// only reused where the authorizer could not have decided differently.
+    /// Narrow it (e.g. `["header:authorization"]`) for identity-only caching,
+    /// API Gateway-style, when the verdict doesn't depend on the other fields.
+    /// Entries: `method`, `host`, `path`, `query`, `source_ip`, `claims`,
+    /// `header:<name>`.
+    #[serde(default)]
+    pub key: Option<Vec<String>>,
+    /// Upper bound on cached entries; the oldest-expiring are evicted first.
+    #[serde(default = "default_authorizer_cache_max_entries")]
+    pub max_entries: usize,
+    /// Also cache 4xx denies. Default true (absorbs repeated bad credentials).
+    #[serde(default = "default_true")]
+    pub cache_denies: bool,
+}
+
+impl Default for AuthorizerCacheConfig {
+    fn default() -> Self {
+        Self {
+            backend: CacheBackend::Memory,
+            ttl_seconds: 0,
+            key: None,
+            max_entries: default_authorizer_cache_max_entries(),
+            cache_denies: true,
+        }
+    }
+}
+
+fn default_authorizer_cache_max_entries() -> usize {
+    100_000
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheBackend {
+    /// In-process, per quik instance.
+    #[default]
+    Memory,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Upper bound on `[authorizers.cache].ttl_seconds` (15 minutes).
+pub const AUTHORIZER_CACHE_MAX_TTL_SECONDS: u64 = 15 * 60;
 
 fn default_authorizer_timeout_ms() -> u64 {
     1000
@@ -1119,6 +1185,46 @@ const AUTHORIZER_FORBIDDEN_INJECT: &[&str] = &[
     "traceparent",
 ];
 
+fn validate_authorizer_cache(a: &AuthorizerConfig) -> Result<()> {
+    let c = &a.cache;
+    if c.ttl_seconds > AUTHORIZER_CACHE_MAX_TTL_SECONDS {
+        anyhow::bail!(
+            "cache.ttl_seconds must be between 0 and {AUTHORIZER_CACHE_MAX_TTL_SECONDS} (15 minutes)"
+        );
+    }
+    if c.ttl_seconds == 0 {
+        return Ok(());
+    }
+    // The verdict depends on the payload, which is never part of the key.
+    if a.include_body {
+        anyhow::bail!("cache cannot be combined with include_body");
+    }
+    if c.max_entries == 0 {
+        anyhow::bail!("cache.max_entries must be > 0");
+    }
+    if let Some(key) = &c.key {
+        if key.is_empty() {
+            anyhow::bail!("cache.key must not be empty (omit it to key on the whole request)");
+        }
+        for k in key {
+            match k.as_str() {
+                "method" | "host" | "path" | "query" | "source_ip" | "claims" => {}
+                other => {
+                    let Some(h) = other.strip_prefix("header:") else {
+                        anyhow::bail!(
+                            "cache.key entry '{other}' must be method, host, path, query, \
+                             source_ip, claims, or header:<name>"
+                        );
+                    };
+                    http::HeaderName::try_from(h)
+                        .with_context(|| format!("cache.key: invalid header name '{h}'"))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_authorizers(authorizers: &[AuthorizerConfig]) -> Result<()> {
     let mut names = HashSet::new();
     for a in authorizers {
@@ -1168,6 +1274,7 @@ fn validate_authorizers(authorizers: &[AuthorizerConfig]) -> Result<()> {
         if a.include_body && a.body_timeout_ms == 0 {
             anyhow::bail!("{}: body_timeout_ms must be > 0", ctx());
         }
+        validate_authorizer_cache(a).with_context(ctx)?;
         if a.tls.cert_path.is_some() != a.tls.key_path.is_some() {
             anyhow::bail!(
                 "{}: tls.cert_path and tls.key_path must be set together",
@@ -1623,6 +1730,53 @@ bind = "127.0.0.1:9090"
             let err = validate(&cfg).unwrap_err().to_string();
             assert!(err.contains(want), "{authz}: expected '{want}' in '{err}'");
         }
+    }
+
+    #[test]
+    fn authorizer_cache_validation() {
+        let ok: Config = toml::from_str(&authorizer_cfg(
+            "url=\"http://x/\"\ncache={ttl_seconds=900, key=[\"header:authorization\", \"path\"]}",
+            "",
+        ))
+        .unwrap();
+        validate(&ok).unwrap();
+        assert_eq!(ok.authorizers[0].cache.backend, CacheBackend::Memory);
+        assert_eq!(ok.authorizers[0].cache.max_entries, 100_000);
+
+        for (authz, want) in [
+            (
+                "url=\"http://x/\"\ncache={ttl_seconds=901}",
+                "between 0 and 900",
+            ),
+            (
+                "url=\"http://x/\"\ninclude_body=true\ncache={ttl_seconds=60}",
+                "include_body",
+            ),
+            (
+                "url=\"http://x/\"\ncache={ttl_seconds=60, key=[]}",
+                "must not be empty",
+            ),
+            (
+                "url=\"http://x/\"\ncache={ttl_seconds=60, key=[\"cookie\"]}",
+                "header:<name>",
+            ),
+            (
+                "url=\"http://x/\"\ncache={ttl_seconds=60, max_entries=0}",
+                "max_entries",
+            ),
+        ] {
+            let cfg: Config = toml::from_str(&authorizer_cfg(authz, "")).unwrap();
+            let err = format!("{:#}", validate(&cfg).unwrap_err());
+            assert!(err.contains(want), "{authz}: expected '{want}' in '{err}'");
+        }
+        // Unknown backends are rejected at parse time.
+        assert!(
+            toml::from_str::<Config>(&authorizer_cfg(
+                "url=\"http://x/\"\ncache={ttl_seconds=60, backend=\"redis\"}",
+                "",
+            ))
+            .is_err()
+        );
     }
 
     #[test]

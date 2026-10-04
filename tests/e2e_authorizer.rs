@@ -96,6 +96,7 @@ fn authorizer_config(addr: SocketAddr) -> AuthorizerConfig {
         include_body: false,
         max_body_bytes: 64 * 1024,
         body_timeout_ms: 10_000,
+        cache: Default::default(),
         tls: Default::default(),
     }
 }
@@ -730,4 +731,177 @@ async fn websocket_upgrade_with_include_body_authorizer() {
     assert_eq!(resp.status(), StatusCode::SWITCHING_PROTOCOLS);
     ws.close(None).await.unwrap();
     assert_eq!(authz.envelopes()[0]["body"], "");
+}
+
+// ── verdict cache ───────────────────────────────────────────────────────────
+
+fn with_cache(addr: SocketAddr, ttl_seconds: u64, key: Option<&[&str]>) -> AuthorizerConfig {
+    AuthorizerConfig {
+        cache: quik::config::AuthorizerCacheConfig {
+            ttl_seconds,
+            key: key.map(|k| k.iter().map(|s| s.to_string()).collect()),
+            ..Default::default()
+        },
+        ..authorizer_config(addr)
+    }
+}
+
+async fn get(proxy: &common::ProxyHandle, path: &str, token: &str) -> reqwest::Response {
+    https_client_http1_only()
+        .get(url(proxy.addr, path))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn cache_serves_repeat_request_without_calling_authorizer() {
+    let authz = MockAuthorizer::spawn(|_| allow_with(json!({ "x-user-id": "u_1" }))).await;
+    let (backend, proxy) = harness(with_cache(authz.addr, 60, None)).await;
+
+    for _ in 0..3 {
+        assert_eq!(get(&proxy, "/api/x", "t1").await.status(), StatusCode::OK);
+    }
+    assert_eq!(authz.envelopes().len(), 1, "2nd and 3rd served from cache");
+    // Cached allows still inject their headers.
+    for call in backend.calls() {
+        assert_eq!(call.headers.get("x-user-id").unwrap(), "u_1");
+    }
+}
+
+/// SECURITY: the default key covers the whole envelope, so a verdict for one
+/// path is never replayed for another the authorizer might treat differently.
+#[tokio::test]
+async fn default_cache_key_separates_paths_and_credentials() {
+    let authz = MockAuthorizer::spawn(|env| {
+        if env["path"] == "/api/admin" {
+            (403, vec![], String::new())
+        } else {
+            allow_with(json!({}))
+        }
+    })
+    .await;
+    let (_backend, proxy) = harness(with_cache(authz.addr, 60, None)).await;
+
+    assert_eq!(
+        get(&proxy, "/api/orders", "t1").await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        get(&proxy, "/api/admin", "t1").await.status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        get(&proxy, "/api/orders", "t2").await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(authz.envelopes().len(), 3);
+}
+
+#[tokio::test]
+async fn narrowed_cache_key_shares_verdict_across_paths() {
+    let authz = MockAuthorizer::spawn(|_| allow_with(json!({ "x-user-id": "u_1" }))).await;
+    let (_backend, proxy) =
+        harness(with_cache(authz.addr, 60, Some(&["header:authorization"]))).await;
+
+    assert_eq!(get(&proxy, "/api/a", "t1").await.status(), StatusCode::OK);
+    assert_eq!(get(&proxy, "/api/b", "t1").await.status(), StatusCode::OK);
+    assert_eq!(authz.envelopes().len(), 1);
+    assert_eq!(get(&proxy, "/api/a", "t2").await.status(), StatusCode::OK);
+    assert_eq!(authz.envelopes().len(), 2, "different credential, new call");
+}
+
+#[tokio::test]
+async fn cache_stores_denies_but_not_errors() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = calls.clone();
+    let authz = MockAuthorizer::spawn(move |env| {
+        if env["path"] == "/api/flaky" {
+            // First call fails, later calls allow.
+            if c.fetch_add(1, Ordering::SeqCst) == 0 {
+                return (500, vec![], String::new());
+            }
+            return allow_with(json!({}));
+        }
+        (401, vec![], r#"{"message":"bad token"}"#.into())
+    })
+    .await;
+    let (_backend, proxy) = harness(with_cache(authz.addr, 60, None)).await;
+
+    // Denies are cached (and relayed with their body each time).
+    for _ in 0..2 {
+        let resp = get(&proxy, "/api/x", "bad").await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.text().await.unwrap(), r#"{"message":"bad token"}"#);
+    }
+    assert_eq!(authz.envelopes().len(), 1);
+
+    // An authorizer error is not cached: the retry calls out and succeeds.
+    assert_eq!(
+        get(&proxy, "/api/flaky", "t").await.status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        get(&proxy, "/api/flaky", "t").await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(authz.envelopes().len(), 3);
+}
+
+#[tokio::test]
+async fn cache_control_no_store_is_honoured() {
+    let authz = MockAuthorizer::spawn(|_| {
+        (
+            200,
+            vec![
+                ("content-type", "application/json"),
+                ("cache-control", "no-store"),
+            ],
+            json!({ "headers": {} }).to_string(),
+        )
+    })
+    .await;
+    let (_backend, proxy) = harness(with_cache(authz.addr, 60, None)).await;
+
+    get(&proxy, "/api/x", "t").await;
+    get(&proxy, "/api/x", "t").await;
+    assert_eq!(authz.envelopes().len(), 2);
+}
+
+#[tokio::test]
+async fn cache_entries_expire_after_ttl() {
+    let authz = MockAuthorizer::spawn(|_| allow_with(json!({}))).await;
+    let (_backend, proxy) = harness(with_cache(authz.addr, 1, None)).await;
+
+    get(&proxy, "/api/x", "t").await;
+    get(&proxy, "/api/x", "t").await;
+    assert_eq!(authz.envelopes().len(), 1);
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    get(&proxy, "/api/x", "t").await;
+    assert_eq!(
+        authz.envelopes().len(),
+        2,
+        "expired entry triggers a fresh call"
+    );
+}
+
+/// SECURITY: a cached allow must not bypass the spoofed-header check - it runs
+/// before the cache lookup on every request.
+#[tokio::test]
+async fn cache_hit_still_rejects_spoofed_headers() {
+    let authz = MockAuthorizer::spawn(|_| allow_with(json!({ "x-user-id": "u_1" }))).await;
+    let (backend, proxy) = harness(with_cache(authz.addr, 60, None)).await;
+
+    assert_eq!(get(&proxy, "/api/x", "t").await.status(), StatusCode::OK);
+    let resp = https_client_http1_only()
+        .get(url(proxy.addr, "/api/x"))
+        .header("authorization", "Bearer t")
+        .header("x-user-id", "root")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(backend.calls().len(), 1);
 }

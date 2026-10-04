@@ -117,6 +117,10 @@ struct Outcome {
     body: Option<String>,
     #[serde(default)]
     www_authenticate: Option<String>,
+    /// `Cache-Control` on the response, e.g. "no-store" or "max-age=30", to
+    /// exercise quik's `[authorizers.cache]`.
+    #[serde(default)]
+    cache_control: Option<String>,
     #[serde(default)]
     delay_ms: u64,
 }
@@ -292,6 +296,16 @@ impl Rule {
 
 impl Outcome {
     fn respond(&self, env: &Value) -> Response<Full<Bytes>> {
+        let mut resp = self.respond_inner(env);
+        if let Some(cc) = &self.cache_control
+            && let Ok(v) = http::HeaderValue::from_str(cc)
+        {
+            resp.headers_mut().insert(http::header::CACHE_CONTROL, v);
+        }
+        resp
+    }
+
+    fn respond_inner(&self, env: &Value) -> Response<Full<Bytes>> {
         let status = StatusCode::from_u16(self.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         if status.is_success() {
             if self.inject.is_empty() {
