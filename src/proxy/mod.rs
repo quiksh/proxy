@@ -435,11 +435,7 @@ async fn forward_inner(
     };
     drop(members_snap);
 
-    metrics::counter!("quik_upstream_selected_total",
-        "pool" => pool_name.clone(),
-        "member" => target.name.clone()
-    )
-    .increment(1);
+    target.selected.increment(1);
 
     // Inflight tracking + health recording. The Balancer already
     // incremented inflight when it picked the member; this guard only
@@ -682,15 +678,32 @@ fn record_access_fields(headers: &HeaderMap, fields: &AccessLogFields) {
     }
 }
 
+/// `status` as a static metric label ("200", "404", ...), built once for
+/// 100-599 so `record_terminal` doesn't format a string per request.
+fn status_label(status: u16) -> metrics::SharedString {
+    static LABELS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    let labels = LABELS.get_or_init(|| {
+        (100u16..600)
+            .map(|s| &*Box::leak(s.to_string().into_boxed_str()))
+            .collect()
+    });
+    match status {
+        100..=599 => metrics::SharedString::const_str(labels[(status - 100) as usize]),
+        other => metrics::SharedString::from_owned(other.to_string()),
+    }
+}
+
 fn record_terminal(route: &Arc<str>, status: u16, start: Instant, upstream: Option<&str>) {
     let duration = start.elapsed();
+    // Labels without per-request allocation: the route label is a shared
+    // `Arc<str>` and the status string comes from a static table.
     metrics::counter!("quik_requests_total",
-        "route" => route.to_string(),
-        "status" => status.to_string()
+        "route" => metrics::SharedString::from_shared(route.clone()),
+        "status" => status_label(status)
     )
     .increment(1);
     metrics::histogram!("quik_request_duration_seconds",
-        "route" => route.to_string()
+        "route" => metrics::SharedString::from_shared(route.clone())
     )
     .record(duration.as_secs_f64());
 
@@ -911,11 +924,7 @@ async fn handle_ws_upgrade(
     };
     drop(members_snap);
 
-    metrics::counter!("quik_upstream_selected_total",
-        "pool" => pool_name.clone(),
-        "member" => target.name.clone()
-    )
-    .increment(1);
+    target.selected.increment(1);
 
     let target_name = target.name.clone();
     let target_authority = target.authority.clone();

@@ -112,7 +112,7 @@ pub struct RouteModules {
     /// Strip this prefix from the request path before forwarding upstream.
     /// If the request path doesn't start with this prefix, the path is left
     /// unchanged.
-    pub strip_prefix: Option<String>,
+    pub strip_prefix: Option<Arc<str>>,
     /// Upper bound on time the upstream has to respond. 504 on expiry.
     pub timeout_ms: Option<u64>,
     /// Maximum inbound request body size in bytes. Enforced via the
@@ -127,11 +127,13 @@ pub struct RouteModules {
 pub struct RouteEntry {
     pub matchers: RouteMatchers,
     pub modules: RouteModules,
-    pub upstream_pool: String,
+    // Shared strings: the proxy clones these out of the table on every
+    // request, so they're `Arc<str>` (a refcount bump) rather than `String`.
+    pub upstream_pool: Arc<str>,
     /// Optional auth block name. None = route is anonymous.
-    pub auth: Option<String>,
+    pub auth: Option<Arc<str>>,
     /// Optional `[[authorizers]]` name. None = no external authorizer.
-    pub authorizer: Option<String>,
+    pub authorizer: Option<Arc<str>>,
     pub label: Arc<str>,
 }
 
@@ -240,7 +242,7 @@ fn build_table(routes: &[RouteConfig]) -> Result<RoutingTable> {
         };
 
         let modules = RouteModules {
-            strip_prefix: r.strip_prefix.clone(),
+            strip_prefix: r.strip_prefix.as_deref().map(Arc::from),
             timeout_ms: r.timeout_ms,
             max_body_bytes: r.max_body_bytes,
             preserve_host: r.preserve_host,
@@ -255,9 +257,9 @@ fn build_table(routes: &[RouteConfig]) -> Result<RoutingTable> {
                 path,
             },
             modules,
-            upstream_pool: r.upstream.clone(),
-            auth: r.auth.clone(),
-            authorizer: r.authorizer.clone(),
+            upstream_pool: Arc::from(r.upstream.as_str()),
+            auth: r.auth.as_deref().map(Arc::from),
+            authorizer: r.authorizer.as_deref().map(Arc::from),
             label,
         });
     }
@@ -372,19 +374,19 @@ mod tests {
         assert_eq!(
             &t.match_request(Some("h"), &Method::GET, "/api/users/42")
                 .unwrap()
-                .upstream_pool,
+                .upstream_pool[..],
             "users"
         );
         assert_eq!(
             &t.match_request(Some("h"), &Method::GET, "/api/x")
                 .unwrap()
-                .upstream_pool,
+                .upstream_pool[..],
             "api"
         );
         assert_eq!(
             &t.match_request(Some("h"), &Method::GET, "/other")
                 .unwrap()
-                .upstream_pool,
+                .upstream_pool[..],
             "root"
         );
     }
@@ -406,13 +408,13 @@ mod tests {
         assert_eq!(
             &t.match_request(Some("h"), &Method::GET, "/api/healthz")
                 .unwrap()
-                .upstream_pool,
+                .upstream_pool[..],
             "health"
         );
         assert_eq!(
             &t.match_request(Some("h"), &Method::GET, "/api/anything")
                 .unwrap()
-                .upstream_pool,
+                .upstream_pool[..],
             "api-prefix"
         );
     }
