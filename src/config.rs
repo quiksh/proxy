@@ -188,7 +188,7 @@ pub struct EgressRuleConfig {
     pub cidrs: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct AuthBlockConfig {
     pub name: String,
     pub jwks_url: String,
@@ -209,6 +209,56 @@ pub struct AuthBlockConfig {
     /// headers by setting them themselves.
     #[serde(default)]
     pub inject_headers: Vec<ClaimHeaderMapping>,
+
+    // ── authorisation: claim values ──────────────────────────────────────────
+    /// Claims that must equal a given string / integer / bool (e.g.
+    /// `{ hd = "example.com" }`). Failure → 403.
+    #[serde(default)]
+    pub claim_equals: std::collections::BTreeMap<String, ClaimValue>,
+    /// Claims that must contain a value: an array claim must have it as an
+    /// element; a string claim must have it as a whitespace-separated token
+    /// (so OAuth `scope` works). Failure → 403.
+    #[serde(default)]
+    pub claim_contains: std::collections::BTreeMap<String, String>,
+
+    // ── authentication strength / recency (step-up) ──────────────────────────
+    /// Every listed value must appear in the token's `amr` array (RFC 8176
+    /// authentication methods, e.g. `["hwk"]`). Failure → re-authentication
+    /// (401, or a redirect to `login_redirect`).
+    #[serde(default)]
+    pub required_amr: Vec<String>,
+    /// The token's `auth_time` must be no older than this. A missing
+    /// `auth_time` fails. Failure → re-authentication.
+    #[serde(default)]
+    pub max_auth_age_seconds: Option<u64>,
+
+    // ── browser sessions ─────────────────────────────────────────────────────
+    /// Read the token from this cookie instead of `Authorization: Bearer`.
+    /// The `Authorization` header is then left alone and forwarded upstream,
+    /// so an app's own bearer token can ride alongside the session. Routes
+    /// only - an egress JWT block must not set it.
+    #[serde(default)]
+    pub token_cookie: Option<String>,
+    /// Forward the `token_cookie` cookie to the upstream. Default false: the
+    /// session token is removed from `Cookie` before forwarding.
+    #[serde(default)]
+    pub forward_token_cookie: bool,
+    /// Login URL to send browsers to when re-authentication would help
+    /// (missing / expired / unverifiable token, stale `auth_time`, missing
+    /// `amr`). `{url}` is replaced with the percent-encoded original URL.
+    /// Only top-level GET/HEAD navigations are redirected; other requests get
+    /// the usual 401/403. Routes only.
+    #[serde(default)]
+    pub login_redirect: Option<String>,
+}
+
+/// A scalar a claim can be compared against in `claim_equals`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum ClaimValue {
+    Bool(bool),
+    Integer(i64),
+    String(String),
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -416,8 +466,16 @@ pub struct ListenerConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct TlsConfig {
-    pub cert_path: PathBuf,
-    pub key_path: PathBuf,
+    #[serde(default)]
+    pub cert_path: Option<PathBuf>,
+    #[serde(default)]
+    pub key_path: Option<PathBuf>,
+    /// Generate an ephemeral self-signed certificate at boot instead of
+    /// reading one from disk. For a listener behind a load balancer that
+    /// re-encrypts without verifying the target certificate (an AWS ALB/NLB
+    /// HTTPS/TLS target group) - never for a listener clients reach directly.
+    #[serde(default)]
+    pub self_signed: bool,
 }
 
 /// Per-listener defensive timeouts and protocol-level limits. Each field is
@@ -1225,6 +1283,61 @@ fn validate_authorizer_cache(a: &AuthorizerConfig) -> Result<()> {
     Ok(())
 }
 
+/// The placeholder `login_redirect` substitutes with the original request URL.
+pub const LOGIN_REDIRECT_URL_PLACEHOLDER: &str = "{url}";
+
+fn validate_auth_block(a: &AuthBlockConfig) -> Result<()> {
+    for k in a.claim_equals.keys().chain(a.claim_contains.keys()) {
+        if k.is_empty() {
+            anyhow::bail!("claim_equals / claim_contains key must not be empty");
+        }
+    }
+    if a.required_amr.iter().any(|m| m.is_empty()) {
+        anyhow::bail!("required_amr entries must not be empty");
+    }
+    if a.max_auth_age_seconds == Some(0) {
+        anyhow::bail!("max_auth_age_seconds must be > 0");
+    }
+    if let Some(c) = &a.token_cookie {
+        // RFC 6265 cookie-name = token (RFC 7230 tchar).
+        let tchar = |b: u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b);
+        if c.is_empty() || !c.bytes().all(tchar) {
+            anyhow::bail!("token_cookie '{c}' is not a valid cookie name");
+        }
+    } else if a.forward_token_cookie {
+        anyhow::bail!("forward_token_cookie requires token_cookie");
+    }
+    if let Some(t) = &a.login_redirect {
+        // Validate with a representative substitution: the result must be an
+        // absolute http(s) URL that is also a legal `Location` header value.
+        let sample = t.replace(
+            LOGIN_REDIRECT_URL_PLACEHOLDER,
+            "https%3A%2F%2Fexample.com%2F",
+        );
+        let uri: http::Uri = sample
+            .parse()
+            .with_context(|| format!("login_redirect '{t}' is not a valid URL"))?;
+        if !matches!(uri.scheme_str(), Some("http") | Some("https")) || uri.host().is_none() {
+            anyhow::bail!("login_redirect '{t}' must be an absolute http:// or https:// URL");
+        }
+        http::HeaderValue::try_from(sample)
+            .with_context(|| format!("login_redirect '{t}' is not a valid header value"))?;
+    }
+    Ok(())
+}
+
+fn validate_listener_tls(t: &TlsConfig) -> Result<()> {
+    match (t.self_signed, &t.cert_path, &t.key_path) {
+        (true, None, None) | (false, Some(_), Some(_)) => Ok(()),
+        (true, _, _) => anyhow::bail!(
+            "[listener.tls]: self_signed cannot be combined with cert_path / key_path"
+        ),
+        (false, _, _) => {
+            anyhow::bail!("[listener.tls]: set both cert_path and key_path, or self_signed = true")
+        }
+    }
+}
+
 fn validate_authorizers(authorizers: &[AuthorizerConfig]) -> Result<()> {
     let mut names = HashSet::new();
     for a in authorizers {
@@ -1305,6 +1418,22 @@ fn validate(cfg: &Config) -> Result<()> {
     let auth_names: HashSet<&str> = cfg.auth.iter().map(|a| a.name.as_str()).collect();
     if auth_names.len() != cfg.auth.len() {
         anyhow::bail!("duplicate auth block names");
+    }
+    for a in &cfg.auth {
+        validate_auth_block(a).with_context(|| format!("auth '{}'", a.name))?;
+    }
+    if let Some(EgressAuthConfig::Jwt { block, .. }) =
+        cfg.egress.as_ref().and_then(|e| e.auth.as_ref())
+        && let Some(a) = cfg.auth.iter().find(|a| &a.name == block)
+        && (a.token_cookie.is_some() || a.login_redirect.is_some())
+    {
+        // CONNECT clients send Proxy-Authorization, never browser cookies.
+        anyhow::bail!(
+            "egress auth block '{block}' must not set token_cookie or login_redirect (routes only)"
+        );
+    }
+    if let Some(l) = &cfg.listener {
+        validate_listener_tls(&l.tls)?;
     }
     validate_authorizers(&cfg.authorizers)?;
     // Fail fast on a malformed trusted-proxy entry rather than silently
@@ -1900,5 +2029,96 @@ hosts = ["api.openai.com"]
         let cfg: Config = toml::from_str(s).unwrap();
         let err = validate(&cfg).unwrap_err();
         assert!(err.to_string().contains("neither [listener]"), "{err}");
+    }
+
+    fn with_auth_block(block_extra: &str) -> Result<Config> {
+        let s = format!(
+            "{MIN}\n[[upstreams]]\nname=\"a\"\nmembers=[{{address=\"127.0.0.1:1\"}}]\n\
+             [[auth]]\nname=\"corp\"\njwks_url=\"https://auth/jwks\"\n{block_extra}\n\
+             [[routes]]\npath_prefix=\"/\"\nupstream=\"a\"\nauth=\"corp\"\n"
+        );
+        let cfg: Config = toml::from_str(&s)?;
+        validate(&cfg)?;
+        Ok(cfg)
+    }
+
+    #[test]
+    fn parses_browser_session_and_step_up_fields() {
+        let cfg = with_auth_block(
+            r#"
+token_cookie         = "__Secure-corp_session"
+login_redirect       = "https://auth.corp.example.com/login?rd={url}&step_up=hwk"
+claim_equals         = { hd = "example.com", email_verified = true, tier = 2 }
+claim_contains       = { groups = "admin-api-users" }
+required_amr         = ["hwk"]
+max_auth_age_seconds = 43200
+"#,
+        )
+        .unwrap();
+        let a = &cfg.auth[0];
+        assert_eq!(a.token_cookie.as_deref(), Some("__Secure-corp_session"));
+        assert!(!a.forward_token_cookie);
+        assert_eq!(
+            a.claim_equals["hd"],
+            ClaimValue::String("example.com".into())
+        );
+        assert_eq!(a.claim_equals["email_verified"], ClaimValue::Bool(true));
+        assert_eq!(a.claim_equals["tier"], ClaimValue::Integer(2));
+        assert_eq!(a.required_amr, vec!["hwk"]);
+        assert_eq!(a.max_auth_age_seconds, Some(43200));
+    }
+
+    #[test]
+    fn rejects_bad_browser_session_fields() {
+        for (extra, needle) in [
+            (r#"token_cookie = "bad name""#, "not a valid cookie name"),
+            (r#"token_cookie = """#, "not a valid cookie name"),
+            ("forward_token_cookie = true", "requires token_cookie"),
+            (r#"login_redirect = "/login?rd={url}""#, "absolute"),
+            (r#"login_redirect = "ftp://auth/login""#, "absolute"),
+            ("max_auth_age_seconds = 0", "max_auth_age_seconds"),
+            (r#"required_amr = [""]"#, "required_amr"),
+        ] {
+            let err = with_auth_block(extra).unwrap_err();
+            assert!(format!("{err:#}").contains(needle), "{extra}: {err:#}");
+        }
+    }
+
+    #[test]
+    fn rejects_session_fields_on_an_egress_jwt_block() {
+        let s = r#"
+[admin]
+bind = "127.0.0.1:9090"
+[[auth]]
+name = "main"
+jwks_url = "https://auth/jwks"
+token_cookie = "s"
+[egress]
+bind = "0.0.0.0:3128"
+default_action = "deny"
+[egress.auth]
+mode = "jwt"
+block = "main"
+"#;
+        let cfg: Config = toml::from_str(s).unwrap();
+        let err = validate(&cfg).unwrap_err();
+        assert!(err.to_string().contains("routes only"), "{err}");
+    }
+
+    #[test]
+    fn listener_tls_needs_paths_or_self_signed_but_not_both() {
+        let tls = |body: &str| {
+            let s = format!(
+                "[listener]\nbind=\"127.0.0.1:8443\"\n[listener.tls]\n{body}\n\
+                 [admin]\nbind=\"127.0.0.1:9090\"\n"
+            );
+            let cfg: Config = toml::from_str(&s).unwrap();
+            validate(&cfg)
+        };
+        tls("self_signed = true").unwrap();
+        tls("cert_path=\"c\"\nkey_path=\"k\"").unwrap();
+        assert!(tls("").is_err());
+        assert!(tls("cert_path=\"c\"").is_err());
+        assert!(tls("self_signed = true\ncert_path=\"c\"\nkey_path=\"k\"").is_err());
     }
 }

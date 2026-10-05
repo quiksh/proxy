@@ -1062,6 +1062,7 @@ fn auth_block(name: &str, jwks_addr: SocketAddr) -> quik::config::AuthBlockConfi
         algorithms: vec!["EdDSA".to_string()],
         required_claims: vec!["sub".to_string()],
         inject_headers: vec![],
+        ..Default::default()
     }
 }
 

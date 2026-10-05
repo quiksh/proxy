@@ -8,11 +8,14 @@
 //! - [`authorizer`]: [`HttpAuthorizer`], an external HTTP service consulted
 //!   per request (`[[authorizers]]`, route field `authorizer = "..."`).
 //! - [`client`]: outbound HTTP clients for JWKS fetches and authorizers.
+//! - [`session`]: browser sessions - token-from-cookie, stripping the session
+//!   cookie before forwarding, and login redirects for page loads.
 
 mod authorizer;
 mod cache;
 mod client;
 mod jwt;
+pub mod session;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -25,7 +28,7 @@ use crate::upstream::ProxyClient;
 
 pub use authorizer::{AuthzRequest, AuthzVerdict, HttpAuthorizer};
 pub use client::build_jwks_client_skip_verify;
-pub use jwt::{AuthError, AuthValidator, Claims, JwksCache};
+pub use jwt::{AuthError, AuthValidator, BrowserSession, Claims, JwksCache};
 
 use client::{build_authorizer_client, build_jwks_client};
 

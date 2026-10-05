@@ -23,7 +23,7 @@ use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, DecodingKey, TokenData, Validation, decode, decode_header};
 use tokio::sync::Mutex;
 
-use crate::config::{AuthBlockConfig, ClaimHeaderMapping};
+use crate::config::{AuthBlockConfig, ClaimHeaderMapping, ClaimValue};
 use crate::upstream::{ProxyBody, ProxyClient, into_proxy_body};
 
 #[derive(Debug)]
@@ -35,6 +35,14 @@ pub enum AuthError {
     DisallowedAlgorithm,
     InvalidSignature,
     InvalidClaims(String),
+    /// `exp` has passed. Rejected like other claim failures (403) on bearer
+    /// routes, but a fresh sign-in fixes it, so it can trigger a redirect.
+    Expired,
+    /// A `claim_equals` / `claim_contains` rule failed (authorisation: 403).
+    ClaimMismatch(String),
+    /// The token is valid but its authentication is too weak or too old for
+    /// this route (`required_amr` / `max_auth_age_seconds`): step up.
+    InsufficientAuthentication(String),
     /// Client tried to set a header name reserved for `inject_headers`.
     /// Carries the offending header name for diagnostic logging.
     SpoofedHeader(String),
@@ -52,6 +60,11 @@ impl std::fmt::Display for AuthError {
             AuthError::DisallowedAlgorithm => write!(f, "disallowed JWT algorithm"),
             AuthError::InvalidSignature => write!(f, "JWT signature verification failed"),
             AuthError::InvalidClaims(m) => write!(f, "JWT claim validation failed: {m}"),
+            AuthError::Expired => write!(f, "JWT expired"),
+            AuthError::ClaimMismatch(m) => write!(f, "JWT claim policy failed: {m}"),
+            AuthError::InsufficientAuthentication(m) => {
+                write!(f, "insufficient user authentication: {m}")
+            }
             AuthError::SpoofedHeader(h) => write!(f, "client supplied reserved header '{h}'"),
             AuthError::JwksFetch(m) => write!(f, "JWKS fetch failed: {m}"),
             AuthError::Other(m) => write!(f, "{m}"),
@@ -60,6 +73,26 @@ impl std::fmt::Display for AuthError {
 }
 
 impl std::error::Error for AuthError {}
+
+impl AuthError {
+    /// Whether signing in again could turn this rejection into an allow - the
+    /// cases a browser is redirected to `login_redirect` for. Wrong issuer /
+    /// audience, missing required claims, claim-policy failures and spoofed
+    /// headers are not: a new token from the same issuer wouldn't change them.
+    pub fn reauth_may_help(&self) -> bool {
+        matches!(
+            self,
+            AuthError::MissingToken
+                | AuthError::MalformedToken
+                | AuthError::MissingKid
+                | AuthError::UnknownKid
+                | AuthError::DisallowedAlgorithm
+                | AuthError::InvalidSignature
+                | AuthError::Expired
+                | AuthError::InsufficientAuthentication(_)
+        )
+    }
+}
 
 pub type Claims = serde_json::Value;
 
@@ -77,6 +110,24 @@ pub struct AuthValidator {
     algorithms: Vec<Algorithm>,
     required_claims: HashSet<String>,
     inject_headers: Vec<CompiledMapping>,
+    claim_equals: Vec<(String, ClaimValue)>,
+    claim_contains: Vec<(String, String)>,
+    required_amr: Vec<String>,
+    max_auth_age_secs: Option<u64>,
+    /// Browser-session settings; routes only (see [`BrowserSession`]).
+    pub session: BrowserSession,
+}
+
+/// Where a route reads its token from and what a browser gets on failure.
+/// Ignored by egress, which always reads `Proxy-Authorization`.
+#[derive(Debug, Clone, Default)]
+pub struct BrowserSession {
+    /// Read the token from this cookie instead of `Authorization: Bearer`.
+    pub token_cookie: Option<String>,
+    /// Remove `token_cookie` from `Cookie` before forwarding upstream.
+    pub strip_token_cookie: bool,
+    /// `login_redirect` template; `{url}` is the encoded original URL.
+    pub login_redirect: Option<String>,
 }
 
 impl AuthValidator {
@@ -108,13 +159,32 @@ impl AuthValidator {
             algorithms,
             required_claims: cfg.required_claims.iter().cloned().collect(),
             inject_headers,
+            claim_equals: cfg
+                .claim_equals
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            claim_contains: cfg
+                .claim_contains
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            required_amr: cfg.required_amr.clone(),
+            max_auth_age_secs: cfg.max_auth_age_seconds,
+            session: BrowserSession {
+                token_cookie: cfg.token_cookie.clone(),
+                strip_token_cookie: cfg.token_cookie.is_some() && !cfg.forward_token_cookie,
+                login_redirect: cfg.login_redirect.clone(),
+            },
         })
     }
 
-    /// Validate a bearer token. On a kid cache miss, attempts a single async
-    /// refresh of the JWKS and retries. Allow only when signature + standard
-    /// claims (`iss`/`aud`/`exp`) check out and every required claim is
-    /// present.
+    /// Validate a token. On a kid cache miss, attempts a single async refresh
+    /// of the JWKS and retries. Allow only when signature + standard claims
+    /// (`iss`/`aud`/`exp`) check out, every required claim is present, the
+    /// claim-value policy holds and the authentication is strong and recent
+    /// enough. Policy (403) is checked before strength (step-up) so a user is
+    /// never sent to step up for a route they couldn't use anyway.
     pub async fn validate(&self, token: &str) -> Result<Claims, AuthError> {
         let header = decode_header(token).map_err(|_| AuthError::MalformedToken)?;
         if !self.algorithms.contains(&header.alg) {
@@ -142,9 +212,9 @@ impl AuthValidator {
             use jsonwebtoken::errors::ErrorKind;
             match e.kind() {
                 ErrorKind::InvalidSignature => AuthError::InvalidSignature,
+                ErrorKind::ExpiredSignature => AuthError::Expired,
                 ErrorKind::InvalidIssuer
                 | ErrorKind::InvalidAudience
-                | ErrorKind::ExpiredSignature
                 | ErrorKind::ImmatureSignature
                 | ErrorKind::MissingRequiredClaim(_) => AuthError::InvalidClaims(e.to_string()),
                 _ => AuthError::Other(e.to_string()),
@@ -159,7 +229,67 @@ impl AuthValidator {
             }
         }
 
+        self.check_claim_policy(&data.claims)?;
+        self.check_authentication(&data.claims, unix_now())?;
+
         Ok(data.claims)
+    }
+
+    fn check_claim_policy(&self, claims: &Claims) -> Result<(), AuthError> {
+        for (name, want) in &self.claim_equals {
+            if !claim_equals(claims.get(name.as_str()), want) {
+                return Err(AuthError::ClaimMismatch(format!(
+                    "claim '{name}' does not equal the required value"
+                )));
+            }
+        }
+        for (name, want) in &self.claim_contains {
+            if !claim_contains(claims.get(name.as_str()), want) {
+                return Err(AuthError::ClaimMismatch(format!(
+                    "claim '{name}' does not contain '{want}'"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn check_authentication(&self, claims: &Claims, now: i64) -> Result<(), AuthError> {
+        for method in &self.required_amr {
+            if !claims
+                .get("amr")
+                .and_then(|v| v.as_array())
+                .is_some_and(|a| a.iter().any(|m| m.as_str() == Some(method)))
+            {
+                return Err(AuthError::InsufficientAuthentication(format!(
+                    "amr lacks '{method}'"
+                )));
+            }
+        }
+        if let Some(max_age) = self.max_auth_age_secs {
+            let Some(auth_time) = claims.get("auth_time").and_then(|v| v.as_i64()) else {
+                return Err(AuthError::InsufficientAuthentication(
+                    "missing auth_time".into(),
+                ));
+            };
+            // Same leeway jsonwebtoken gives `exp`, for small clock skew.
+            if auth_time > now + CLOCK_LEEWAY_SECS {
+                return Err(AuthError::InsufficientAuthentication(
+                    "auth_time is in the future".into(),
+                ));
+            }
+            if now - auth_time > max_age as i64 {
+                return Err(AuthError::InsufficientAuthentication(
+                    "auth_time older than max_auth_age_seconds".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The `max_auth_age_seconds` this block enforces, for the step-up
+    /// `WWW-Authenticate` challenge (RFC 9470 `max_age`).
+    pub fn max_auth_age_secs(&self) -> Option<u64> {
+        self.max_auth_age_secs
     }
 
     /// Validate the bearer token, then write any configured claim-to-header
@@ -228,6 +358,34 @@ impl AuthValidator {
             }
         }
         Ok(())
+    }
+}
+
+const CLOCK_LEEWAY_SECS: i64 = 60;
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn claim_equals(v: Option<&serde_json::Value>, want: &ClaimValue) -> bool {
+    match (v, want) {
+        (Some(serde_json::Value::String(s)), ClaimValue::String(w)) => s == w,
+        (Some(serde_json::Value::Bool(b)), ClaimValue::Bool(w)) => b == w,
+        (Some(serde_json::Value::Number(n)), ClaimValue::Integer(w)) => n.as_i64() == Some(*w),
+        _ => false,
+    }
+}
+
+/// Array claims match on an element; string claims on a whitespace-separated
+/// token (OAuth `scope = "read write"`). Anything else never matches.
+fn claim_contains(v: Option<&serde_json::Value>, want: &str) -> bool {
+    match v {
+        Some(serde_json::Value::Array(a)) => a.iter().any(|x| x.as_str() == Some(want)),
+        Some(serde_json::Value::String(s)) => s.split_ascii_whitespace().any(|t| t == want),
+        _ => false,
     }
 }
 

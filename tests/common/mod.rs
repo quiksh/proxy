@@ -777,8 +777,9 @@ async fn spawn_proxy_full(
         listener: Some(ListenerConfig {
             bind: "127.0.0.1:0".parse().unwrap(),
             tls: TlsConfig {
-                cert_path: "ignored".into(),
-                key_path: "ignored".into(),
+                cert_path: Some("ignored".into()),
+                key_path: Some("ignored".into()),
+                self_signed: false,
             },
             limits,
         }),

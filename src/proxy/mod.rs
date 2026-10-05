@@ -44,8 +44,10 @@ use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tracing::Instrument;
 
+use crate::auth::session as auth_session;
 use crate::auth::{
-    AuthError, AuthzRequest, AuthzVerdict, Claims, SharedAuthRegistry, extract_bearer_token,
+    AuthError, AuthValidator, AuthzRequest, AuthzVerdict, Claims, SharedAuthRegistry,
+    extract_bearer_token,
 };
 use crate::config::AuthorizerOnError;
 use crate::config::Mode;
@@ -1147,9 +1149,7 @@ async fn authenticate(
     ctx: AuthCtx<'_>,
 ) -> Result<InboundBody, Rejection> {
     let claims = match ctx.auth_name {
-        Some(name) => {
-            Some(apply_route_auth(auth, name, &mut head.headers, ctx.route_label, ctx.start).await?)
-        }
+        Some(name) => Some(apply_route_auth(auth, name, head, ctx.route_label, ctx.start).await?),
         None => None,
     };
     let Some(name) = ctx.authorizer_name else {
@@ -1303,14 +1303,16 @@ async fn buffer_body(
     }
 }
 
-/// Run the route's `[[auth]]` block against the inbound headers: validate the
-/// bearer token and write any claim-mapped headers, returning the verified
-/// claims. On rejection, records the terminal access-log line and returns the
-/// response to send.
+/// Run the route's `[[auth]]` block against the request: read the token (bearer
+/// header, or the block's `token_cookie`), validate it and write any
+/// claim-mapped headers, returning the verified claims. On rejection, records
+/// the terminal access-log line and returns the response to send - a login
+/// redirect for browser page loads when the block has `login_redirect` and
+/// signing in again could help.
 async fn apply_route_auth(
     auth: &SharedAuthRegistry,
     name: &str,
-    headers: &mut HeaderMap,
+    head: &mut http::request::Parts,
     route_label: &Arc<str>,
     start: Instant,
 ) -> Result<Claims, Rejection> {
@@ -1323,44 +1325,128 @@ async fn apply_route_auth(
             "auth misconfigured\n",
         )));
     };
+    let session = &validator.session;
     // Take an owned copy of the token so the immutable borrow on headers
     // doesn't outlive the call - validate_and_inject needs a mutable borrow on
     // the same HeaderMap to write the injected headers.
-    let Some(token) = extract_bearer_token(headers).map(|t| t.to_owned()) else {
-        metrics::counter!("quik_auth_total", "auth" => name.to_owned(), "outcome" => "missing_token").increment(1);
-        record_terminal(route_label, 401, start, None);
-        return Err(Box::new(unauthorized("missing bearer token")));
+    let token = match &session.token_cookie {
+        Some(cookie) => auth_session::cookie_value(&head.headers, cookie),
+        None => extract_bearer_token(&head.headers),
+    }
+    .map(str::to_owned);
+    let result = match token {
+        Some(t) => validator.validate_and_inject(&t, &mut head.headers).await,
+        None => Err(AuthError::MissingToken),
     };
-    match validator.validate_and_inject(&token, headers).await {
+    match result {
         Ok(claims) => {
+            // SECURITY: the session token authenticates the user to quik, not
+            // to the app - don't hand it to every upstream.
+            if session.strip_token_cookie
+                && let Some(cookie) = &session.token_cookie
+            {
+                auth_session::strip_cookie(&mut head.headers, cookie);
+            }
             metrics::counter!("quik_auth_total", "auth" => name.to_owned(), "outcome" => "ok")
                 .increment(1);
             Ok(claims)
         }
-        Err(e) => {
-            let outcome = match &e {
-                AuthError::MissingToken => "missing_token",
-                AuthError::MalformedToken => "malformed",
-                AuthError::MissingKid => "missing_kid",
-                AuthError::UnknownKid => "unknown_kid",
-                AuthError::DisallowedAlgorithm => "disallowed_alg",
-                AuthError::InvalidSignature => "bad_signature",
-                AuthError::InvalidClaims(_) => "bad_claims",
-                AuthError::SpoofedHeader(_) => "spoofed_header",
-                AuthError::JwksFetch(_) => "jwks_fetch",
-                AuthError::Other(_) => "other",
-            };
-            metrics::counter!("quik_auth_total", "auth" => name.to_owned(), "outcome" => outcome)
-                .increment(1);
-            tracing::debug!(auth = %name, error = %e, "auth rejected");
-            let status = match e {
-                AuthError::InvalidClaims(_) | AuthError::SpoofedHeader(_) => StatusCode::FORBIDDEN,
-                _ => StatusCode::UNAUTHORIZED,
-            };
-            record_terminal(route_label, status.as_u16(), start, None);
-            Err(Box::new(unauthorized_with_status(status, "auth rejected")))
-        }
+        Err(e) => Err(reject_auth(&validator, name, e, head, route_label, start)),
     }
+}
+
+/// Build the response for a failed `[[auth]]` check (see [`apply_route_auth`]).
+fn reject_auth(
+    validator: &AuthValidator,
+    name: &str,
+    e: AuthError,
+    head: &http::request::Parts,
+    route_label: &Arc<str>,
+    start: Instant,
+) -> Rejection {
+    let outcome = match &e {
+        AuthError::MissingToken => "missing_token",
+        AuthError::MalformedToken => "malformed",
+        AuthError::MissingKid => "missing_kid",
+        AuthError::UnknownKid => "unknown_kid",
+        AuthError::DisallowedAlgorithm => "disallowed_alg",
+        AuthError::InvalidSignature => "bad_signature",
+        // `exp` failures were always counted as bad_claims; keep the label.
+        AuthError::InvalidClaims(_) | AuthError::Expired => "bad_claims",
+        AuthError::ClaimMismatch(_) => "claim_mismatch",
+        AuthError::InsufficientAuthentication(_) => "insufficient_auth",
+        AuthError::SpoofedHeader(_) => "spoofed_header",
+        AuthError::JwksFetch(_) => "jwks_fetch",
+        AuthError::Other(_) => "other",
+    };
+    metrics::counter!("quik_auth_total", "auth" => name.to_owned(), "outcome" => outcome)
+        .increment(1);
+    tracing::debug!(auth = %name, error = %e, "auth rejected");
+
+    if e.reauth_may_help()
+        && let Some(template) = &validator.session.login_redirect
+        && auth_session::is_navigation(&head.method, &head.headers)
+        && let Some(location) = auth_session::login_location(template, &head.headers, &head.uri)
+    {
+        metrics::counter!("quik_auth_redirects_total", "auth" => name.to_owned()).increment(1);
+        record_terminal(route_label, 302, start, None);
+        return Box::new(login_redirect(location));
+    }
+
+    if let AuthError::InsufficientAuthentication(_) = e {
+        record_terminal(route_label, 401, start, None);
+        return Box::new(step_up_required(validator.max_auth_age_secs()));
+    }
+    if let AuthError::MissingToken = e {
+        record_terminal(route_label, 401, start, None);
+        let msg = if validator.session.token_cookie.is_some() {
+            "missing session"
+        } else {
+            "missing bearer token"
+        };
+        return Box::new(unauthorized(msg));
+    }
+    let status = match e {
+        AuthError::InvalidClaims(_)
+        | AuthError::Expired
+        | AuthError::ClaimMismatch(_)
+        | AuthError::SpoofedHeader(_) => StatusCode::FORBIDDEN,
+        _ => StatusCode::UNAUTHORIZED,
+    };
+    record_terminal(route_label, status.as_u16(), start, None);
+    Box::new(unauthorized_with_status(status, "auth rejected"))
+}
+
+/// 302 to the sign-in service. `no-store` so a browser or shared cache never
+/// replays a redirect after the user has signed in.
+fn login_redirect(location: http::HeaderValue) -> Response<ProxyBody> {
+    Response::builder()
+        .status(StatusCode::FOUND)
+        .header(http::header::LOCATION, location)
+        .header(http::header::CACHE_CONTROL, "no-store")
+        .body(into_proxy_body(Full::new(Bytes::from_static(
+            b"sign-in required\n",
+        ))))
+        .expect("static response builds")
+}
+
+/// 401 for a valid token whose authentication is too weak or too old, with
+/// the RFC 9470 step-up challenge so a client (or SPA) can tell it apart from
+/// "not signed in" and send the user to step up.
+fn step_up_required(max_age: Option<u64>) -> Response<ProxyBody> {
+    let challenge = match max_age {
+        Some(s) => format!("Bearer error=\"insufficient_user_authentication\", max_age={s}"),
+        None => "Bearer error=\"insufficient_user_authentication\"".to_string(),
+    };
+    Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header(http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(http::header::WWW_AUTHENTICATE, challenge)
+        .header(http::header::CACHE_CONTROL, "no-store")
+        .body(into_proxy_body(Full::new(Bytes::from_static(
+            b"stronger or more recent authentication required\n",
+        ))))
+        .expect("static response builds")
 }
 
 fn unauthorized(msg: &'static str) -> Response<ProxyBody> {

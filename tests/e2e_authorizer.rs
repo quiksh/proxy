@@ -384,6 +384,7 @@ async fn jwt_claims_are_forwarded_to_authorizer() {
             algorithms: vec!["EdDSA".into()],
             required_claims: vec![],
             inject_headers: vec![],
+            ..Default::default()
         }],
         vec![authorizer_config(authz.addr)],
     )

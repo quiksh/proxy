@@ -87,11 +87,29 @@ key_path  = "/etc/quik/tls/key.pem"
 | Field             | Type     | Required | Notes                                       |
 |-------------------|----------|----------|---------------------------------------------|
 | `bind`            | socket   | yes      | `host:port` or `[ipv6]:port`.               |
-| `tls.cert_path`   | path     | yes      | PEM cert (chain).                           |
-| `tls.key_path`    | path     | yes      | PEM private key.                            |
+| `tls.cert_path`   | path     | yes¹     | PEM cert (chain).                           |
+| `tls.key_path`    | path     | yes¹     | PEM private key.                            |
+| `tls.self_signed` | bool     | no       | Generate an ephemeral self-signed cert at boot instead. See below. |
 | `limits`          | table    | no       | See [`[listener.limits]`](#listenerlimits). |
 
+¹ Set both `cert_path` and `key_path`, or `self_signed = true` - not both.
+
 ALPN advertises `h2` and `http/1.1`.
+
+**Behind a load balancer.** An AWS ALB (HTTPS target group) or NLB (TLS
+target group) re-encrypts to its targets without verifying their certificate.
+There, `self_signed = true` gives quik a fresh in-memory P-256 key and
+`localhost` certificate on every boot - no key file in the image, nothing to
+rotate. Never use it on a listener that clients reach directly: they'd get a
+certificate error, or learn to click through one.
+
+```toml
+[listener]
+bind = "0.0.0.0:8443"
+
+[listener.tls]
+self_signed = true
+```
 
 ### `[listener.limits]`
 
@@ -384,6 +402,13 @@ inject_headers = [
 | `algorithms`      | array of strings | `["RS256", "ES256", "EdDSA"]`  | Whitelist. Other algs in the token → 401.                                       |
 | `required_claims` | array of strings | `[]`                           | Claim names that must be present.                                               |
 | `inject_headers`  | array of mapping | `[]`                           | See below.                                                                      |
+| `claim_equals`    | table            | `{}`                           | Claim → required string / integer / bool. Mismatch or absent → 403. [Details](#claim-policy-and-step-up). |
+| `claim_contains`  | table            | `{}`                           | Claim → value an array claim must contain (or a string claim must have as a space-separated token). → 403. |
+| `required_amr`    | array of strings | `[]`                           | Each must be in the token's `amr` array. Missing → 401 step-up (or redirect).  |
+| `max_auth_age_seconds` | u64         | unset                          | `auth_time` must be at most this old. Stale / absent → 401 step-up (or redirect). |
+| `token_cookie`    | string           | unset                          | Read the token from this cookie instead of `Authorization`. [Details](#browser-sessions). Routes only. |
+| `forward_token_cookie` | bool        | `false`                        | Forward the session cookie upstream. By default it is removed from `Cookie`.   |
+| `login_redirect`  | URL template     | unset                          | Where browsers are sent to sign in; `{url}` is the encoded original URL. Routes only. |
 
 ### `inject_headers` mapping
 
@@ -407,6 +432,89 @@ Value coercion when injecting:
 | array of strings  | comma-joined                       |
 | array mixed / object | JSON-encoded                    |
 | null / missing (and not required) | header dropped     |
+
+### Claim policy and step-up
+
+Checks run in this order, after the signature, `iss`, `aud`, `exp` and
+`required_claims`:
+
+1. **`claim_equals` / `claim_contains`** - authorisation. Is this user allowed
+   on this route at all? Failure is a 403, never a redirect: signing in again
+   wouldn't change the answer.
+2. **`required_amr` / `max_auth_age_seconds`** - authentication strength and
+   recency. Did the user prove themselves strongly enough, recently enough?
+   Failure is a 401 with an [RFC 9470](https://www.rfc-editor.org/rfc/rfc9470)
+   step-up challenge, or a redirect to `login_redirect` for page loads.
+
+Policy runs first so nobody is asked to touch a hardware key for a route they
+can't use anyway.
+
+```toml
+[[auth]]
+name                 = "corp-hwk"
+# ...jwks_url / issuer / audience...
+claim_equals         = { hd = "example.com" }
+claim_contains       = { groups = "admin-api-users" }
+required_amr         = ["hwk"]          # RFC 8176 method: hardware key
+max_auth_age_seconds = 43200            # touched within 12 hours
+```
+
+- `claim_equals` compares by type: `true` does not match the string `"true"`,
+  and `2` does not match `"2"`.
+- `claim_contains` on an array (`groups = ["a", "b"]`) matches an element; on a
+  string (`scope = "read write"`) it matches a whole space-separated token, so
+  `write` matches but `writ` does not.
+- `max_auth_age_seconds` allows `auth_time` up to 60 s in the future for clock
+  skew, the same leeway as `exp`.
+- Step-up 401s carry
+  `WWW-Authenticate: Bearer error="insufficient_user_authentication"` (plus
+  `max_age=<n>` when `max_auth_age_seconds` is set), so a single-page app can
+  tell "step up" apart from "not signed in".
+
+These checks also apply when the block is used by `[egress.auth]`.
+
+### Browser sessions
+
+`token_cookie` and `login_redirect` turn an `[[auth]]` block into the
+enforcement half of an identity-aware proxy: a separate sign-in service issues
+a session JWT in a cookie, and quik checks it on every request. See
+[identity-aware proxy](identity-aware-proxy.md) for the full contract.
+
+```toml
+[[auth]]
+name           = "corp"
+jwks_url       = "https://auth.corp.example.com/.well-known/jwks.json"
+issuer         = "https://auth.corp.example.com"
+audience       = "corp"
+algorithms     = ["ES256"]
+token_cookie   = "__Secure-corp_session"
+login_redirect = "https://auth.corp.example.com/login?rd={url}"
+claim_equals   = { hd = "example.com" }
+inject_headers = [{ claim = "email", header = "x-auth-email", required = true }]
+```
+
+- **Token source.** With `token_cookie` set, *only* that cookie is read. A
+  bearer token in `Authorization` is ignored for authentication and forwarded
+  upstream unchanged, so an app's own token can travel alongside the session.
+- **Cookie stripping.** The session cookie is removed from `Cookie` before
+  forwarding (other cookies are kept), so backends never see the session
+  token. Set `forward_token_cookie = true` to keep it.
+- **Login redirect.** When signing in again could help - no token, a malformed,
+  expired or unverifiable one, or a failed step-up check - a **page load** gets
+  `302 Found` to `login_redirect` with `Cache-Control: no-store`. A page load
+  is a GET/HEAD with `Sec-Fetch-Mode: navigate` or, from clients that don't
+  send fetch metadata, `Accept: text/html`. Everything else (`fetch`, XHR,
+  scripts, POSTs) gets the 401/403 it would without a redirect.
+- **`{url}`** becomes the percent-encoded `https://<host><path>?<query>` of the
+  original request, before `strip_prefix`. The host comes from the client, so
+  **the sign-in service must check the return URL against its own allow-list**
+  before redirecting back to it.
+- Without `login_redirect`, a missing session is a 401 and an expired one a
+  403, as for bearer tokens.
+
+Metrics: `quik_auth_total{auth,outcome}` gains `claim_mismatch` and
+`insufficient_auth` outcomes (expired tokens stay under `bad_claims`), and
+`quik_auth_redirects_total{auth}` counts login redirects.
 
 ## `[[authorizers]]`
 
