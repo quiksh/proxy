@@ -42,8 +42,13 @@ fn public_roots() -> rustls::RootCertStore {
 }
 
 pub(super) fn build_jwks_client() -> ProxyClient {
+    // Build the roots first: `ClientConfig::builder()` needs the process
+    // crypto provider, which `public_roots` installs. Called inline as the
+    // argument, it would run after `builder()` and panic in a config with
+    // `[[auth]]` but no `[[upstreams]]` (nothing else has installed it yet).
+    let roots = public_roots();
     let tls_config = ClientConfig::builder()
-        .with_root_certificates(public_roots())
+        .with_root_certificates(roots)
         .with_no_client_auth();
     build_client(tls_config, 2, Duration::from_secs(60))
 }
