@@ -87,7 +87,16 @@ pub fn is_navigation(method: &Method, headers: &HeaderMap) -> bool {
 ///
 /// The host comes from the client, so the sign-in service must validate the
 /// return URL against its own allow-list before redirecting back to it.
-pub fn login_location(template: &str, headers: &HeaderMap, uri: &http::Uri) -> Option<HeaderValue> {
+///
+/// `params` are appended to the query (percent-encoded) - how the route's
+/// step-up requirements reach the sign-in service. Config validation rejects
+/// templates with a fragment, so appending is always safe.
+pub fn login_location(
+    template: &str,
+    headers: &HeaderMap,
+    uri: &http::Uri,
+    params: &[(&str, &str)],
+) -> Option<HeaderValue> {
     let host = headers
         .get(HOST)
         .and_then(|h| h.to_str().ok())
@@ -95,7 +104,13 @@ pub fn login_location(template: &str, headers: &HeaderMap, uri: &http::Uri) -> O
         .filter(|h| !h.is_empty())?;
     let paq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
     let original = format!("https://{host}{paq}");
-    let location = template.replace(LOGIN_REDIRECT_URL_PLACEHOLDER, &percent_encode(&original));
+    let mut location = template.replace(LOGIN_REDIRECT_URL_PLACEHOLDER, &percent_encode(&original));
+    for (k, v) in params {
+        location.push(if location.contains('?') { '&' } else { '?' });
+        location.push_str(k);
+        location.push('=');
+        location.push_str(&percent_encode(v));
+    }
     HeaderValue::try_from(location).ok()
 }
 
@@ -181,36 +196,64 @@ mod tests {
 
     #[test]
     fn login_location_encodes_original_url() {
-        let h = headers(&[("host", "admin.corp.example.com")]);
+        let h = headers(&[("host", "admin.corp.example.test")]);
         let uri: http::Uri = "/a/b?x=1&y=two words".replace(' ', "%20").parse().unwrap();
-        let loc = login_location("https://auth.corp.example.com/login?rd={url}", &h, &uri).unwrap();
+        let loc = login_location(
+            "https://auth.corp.example.test/login?rd={url}",
+            &h,
+            &uri,
+            &[],
+        )
+        .unwrap();
         assert_eq!(
             loc,
-            "https://auth.corp.example.com/login?rd=https%3A%2F%2Fadmin.corp.example.com%2Fa%2Fb%3Fx%3D1%26y%3Dtwo%2520words"
+            "https://auth.corp.example.test/login?rd=https%3A%2F%2Fadmin.corp.example.test%2Fa%2Fb%3Fx%3D1%26y%3Dtwo%2520words"
         );
     }
 
     #[test]
     fn login_location_uses_h2_authority_and_needs_a_host() {
-        let uri: http::Uri = "https://admin.corp.example.com/".parse().unwrap();
-        let loc = login_location("https://auth/l?rd={url}", &HeaderMap::new(), &uri).unwrap();
+        let uri: http::Uri = "https://admin.corp.example.test/".parse().unwrap();
+        let loc = login_location("https://auth/l?rd={url}", &HeaderMap::new(), &uri, &[]).unwrap();
         assert_eq!(
             loc,
-            "https://auth/l?rd=https%3A%2F%2Fadmin.corp.example.com%2F"
+            "https://auth/l?rd=https%3A%2F%2Fadmin.corp.example.test%2F"
         );
 
         let no_host: http::Uri = "/".parse().unwrap();
-        assert!(login_location("https://auth/l?rd={url}", &HeaderMap::new(), &no_host).is_none());
+        assert!(
+            login_location("https://auth/l?rd={url}", &HeaderMap::new(), &no_host, &[]).is_none()
+        );
+    }
+
+    #[test]
+    fn step_up_params_are_appended_and_encoded() {
+        let h = headers(&[("host", "a.example.test")]);
+        let uri: http::Uri = "/".parse().unwrap();
+        let loc = login_location(
+            "https://auth/l?rd={url}",
+            &h,
+            &uri,
+            &[("amr_values", "hwk pin"), ("max_age", "300")],
+        )
+        .unwrap();
+        assert_eq!(
+            loc,
+            "https://auth/l?rd=https%3A%2F%2Fa.example.test%2F&amr_values=hwk%20pin&max_age=300"
+        );
+        // A template without a query gets one.
+        let loc = login_location("https://auth/login", &h, &uri, &[("max_age", "5")]).unwrap();
+        assert_eq!(loc, "https://auth/login?max_age=5");
     }
 
     #[test]
     fn hostile_host_cannot_inject_into_location() {
         // Whatever the client puts in Host is percent-encoded into one value.
-        let h = headers(&[("host", "evil.com/x?rd=https://attacker")]);
+        let h = headers(&[("host", "evil.invalid/x?rd=https://attacker")]);
         let uri: http::Uri = "/".parse().unwrap();
-        let loc = login_location("https://auth/l?rd={url}", &h, &uri).unwrap();
+        let loc = login_location("https://auth/l?rd={url}", &h, &uri, &[]).unwrap();
         let s = loc.to_str().unwrap();
-        assert!(s.starts_with("https://auth/l?rd=https%3A%2F%2Fevil.com%2Fx%3Frd%3D"));
+        assert!(s.starts_with("https://auth/l?rd=https%3A%2F%2Fevil.invalid%2Fx%3Frd%3D"));
         assert_eq!(s.matches('?').count(), 1);
     }
 }

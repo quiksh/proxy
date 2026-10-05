@@ -28,9 +28,9 @@ small HTTP admin API.
 - **Per-route modules**: timeout, max body size, prefix stripping, JWT auth,
   external authoriser.
 - **JWT authentication** with JWKS auto-refresh on `kid` miss; verified
-  claims project into upstream-bound headers. Per-route claim policy
-  (`claim_equals`, `claim_contains`) and step-up checks (`required_amr`,
-  `max_auth_age_seconds`).
+  claims project into upstream-bound headers. Claim rules
+  (`claim_equals`, `claim_contains`) per issuer, plus per-route requirements
+  and step-up (`[routes.require]`: `amr`, `max_auth_age_seconds`).
 - **Browser sessions** for an identity-aware proxy: read the JWT from a cookie,
   strip it before forwarding, and redirect page loads to a sign-in service
   ([docs/identity-aware-proxy.md](docs/identity-aware-proxy.md)).

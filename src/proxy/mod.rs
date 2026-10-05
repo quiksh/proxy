@@ -44,6 +44,7 @@ use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tracing::Instrument;
 
+use crate::auth::policy::Requirements;
 use crate::auth::session as auth_session;
 use crate::auth::{
     AuthError, AuthValidator, AuthzRequest, AuthzVerdict, Claims, SharedAuthRegistry,
@@ -355,7 +356,7 @@ async fn forward_inner(
     let path = parts.uri.path();
     let method = &parts.method;
 
-    let (route_label, pool_name, modules, auth_name, authorizer_name) = {
+    let (route_label, pool_name, modules, auth_name, authorizer_name, require) = {
         let table = routing.load();
         let Some(route) = table.match_request(host, method, path) else {
             let none_label: Arc<str> = Arc::from("_none");
@@ -368,6 +369,7 @@ async fn forward_inner(
             route.modules.clone(),
             route.auth.clone(),
             route.authorizer.clone(),
+            route.require.clone(),
         )
     };
 
@@ -396,6 +398,7 @@ async fn forward_inner(
         AuthCtx {
             auth_name: auth_name.as_deref(),
             authorizer_name: authorizer_name.as_deref(),
+            require: require.as_deref(),
             max_body_bytes: modules.max_body_bytes,
             peer_ip,
             request_id: &request_id,
@@ -867,7 +870,7 @@ async fn handle_ws_upgrade(
     let path = req.uri().path();
     let method = req.method().clone();
 
-    let (route_label, pool_name, auth_name, authorizer_name) = {
+    let (route_label, pool_name, auth_name, authorizer_name, require) = {
         let table = routing.load();
         let Some(route) = table.match_request(host, &method, path) else {
             let none_label: Arc<str> = Arc::from("_none");
@@ -879,6 +882,7 @@ async fn handle_ws_upgrade(
             route.upstream_pool.clone(),
             route.auth.clone(),
             route.authorizer.clone(),
+            route.require.clone(),
         )
     };
 
@@ -894,6 +898,7 @@ async fn handle_ws_upgrade(
         AuthCtx {
             auth_name: auth_name.as_deref(),
             authorizer_name: authorizer_name.as_deref(),
+            require: require.as_deref(),
             max_body_bytes: None,
             peer_ip,
             request_id: &request_id,
@@ -1127,6 +1132,8 @@ impl InboundBody {
 struct AuthCtx<'a> {
     auth_name: Option<&'a str>,
     authorizer_name: Option<&'a str>,
+    /// The route's `[routes.require]`, checked after the auth block.
+    require: Option<&'a Requirements>,
     /// The route's `max_body_bytes`, honoured when buffering for an authorizer.
     max_body_bytes: Option<u64>,
     peer_ip: IpAddr,
@@ -1149,7 +1156,9 @@ async fn authenticate(
     ctx: AuthCtx<'_>,
 ) -> Result<InboundBody, Rejection> {
     let claims = match ctx.auth_name {
-        Some(name) => Some(apply_route_auth(auth, name, head, ctx.route_label, ctx.start).await?),
+        Some(name) => {
+            Some(apply_route_auth(auth, name, head, ctx.require, ctx.route_label, ctx.start).await?)
+        }
         None => None,
     };
     let Some(name) = ctx.authorizer_name else {
@@ -1304,8 +1313,8 @@ async fn buffer_body(
 }
 
 /// Run the route's `[[auth]]` block against the request: read the token (bearer
-/// header, or the block's `token_cookie`), validate it and write any
-/// claim-mapped headers, returning the verified claims. On rejection, records
+/// header, or the block's `token_cookie`), validate it, check the route's
+/// `require`, and write any claim-mapped headers, returning the verified claims. On rejection, records
 /// the terminal access-log line and returns the response to send - a login
 /// redirect for browser page loads when the block has `login_redirect` and
 /// signing in again could help.
@@ -1313,6 +1322,7 @@ async fn apply_route_auth(
     auth: &SharedAuthRegistry,
     name: &str,
     head: &mut http::request::Parts,
+    require: Option<&Requirements>,
     route_label: &Arc<str>,
     start: Instant,
 ) -> Result<Claims, Rejection> {
@@ -1335,7 +1345,11 @@ async fn apply_route_auth(
     }
     .map(str::to_owned);
     let result = match token {
-        Some(t) => validator.validate_and_inject(&t, &mut head.headers).await,
+        Some(t) => {
+            validator
+                .validate_and_inject(&t, &mut head.headers, require)
+                .await
+        }
         None => Err(AuthError::MissingToken),
     };
     match result {
@@ -1351,7 +1365,15 @@ async fn apply_route_auth(
                 .increment(1);
             Ok(claims)
         }
-        Err(e) => Err(reject_auth(&validator, name, e, head, route_label, start)),
+        Err(e) => Err(reject_auth(
+            &validator,
+            name,
+            e,
+            head,
+            require,
+            route_label,
+            start,
+        )),
     }
 }
 
@@ -1361,9 +1383,18 @@ fn reject_auth(
     name: &str,
     e: AuthError,
     head: &http::request::Parts,
+    require: Option<&Requirements>,
     route_label: &Arc<str>,
     start: Instant,
 ) -> Rejection {
+    // What the route asks of the sign-in itself, passed on so the sign-in
+    // service can satisfy it in one round trip (RFC 9470 `max_age`; `amr`
+    // values space-separated like `acr_values`).
+    let step_up = require.filter(|r| r.has_step_up());
+    let amr_values = step_up.map(|r| r.amr().join(" ")).filter(|v| !v.is_empty());
+    let max_age = step_up
+        .and_then(|r| r.max_auth_age_secs())
+        .map(|s| s.to_string());
     let outcome = match &e {
         AuthError::MissingToken => "missing_token",
         AuthError::MalformedToken => "malformed",
@@ -1386,7 +1417,16 @@ fn reject_auth(
     if e.reauth_may_help()
         && let Some(template) = &validator.session.login_redirect
         && auth_session::is_navigation(&head.method, &head.headers)
-        && let Some(location) = auth_session::login_location(template, &head.headers, &head.uri)
+        && let Some(location) = {
+            let mut params: Vec<(&str, &str)> = Vec::with_capacity(2);
+            if let Some(v) = &amr_values {
+                params.push(("amr_values", v));
+            }
+            if let Some(v) = &max_age {
+                params.push(("max_age", v));
+            }
+            auth_session::login_location(template, &head.headers, &head.uri, &params)
+        }
     {
         metrics::counter!("quik_auth_redirects_total", "auth" => name.to_owned()).increment(1);
         record_terminal(route_label, 302, start, None);
@@ -1395,7 +1435,7 @@ fn reject_auth(
 
     if let AuthError::InsufficientAuthentication(_) = e {
         record_terminal(route_label, 401, start, None);
-        return Box::new(step_up_required(validator.max_auth_age_secs()));
+        return Box::new(step_up_required(amr_values.as_deref(), max_age.as_deref()));
     }
     if let AuthError::MissingToken = e {
         record_terminal(route_label, 401, start, None);
@@ -1432,16 +1472,25 @@ fn login_redirect(location: http::HeaderValue) -> Response<ProxyBody> {
 
 /// 401 for a valid token whose authentication is too weak or too old, with
 /// the RFC 9470 step-up challenge so a client (or SPA) can tell it apart from
-/// "not signed in" and send the user to step up.
-fn step_up_required(max_age: Option<u64>) -> Response<ProxyBody> {
-    let challenge = match max_age {
-        Some(s) => format!("Bearer error=\"insufficient_user_authentication\", max_age={s}"),
-        None => "Bearer error=\"insufficient_user_authentication\"".to_string(),
-    };
+/// "not signed in" and send the user to step up with the same parameters a
+/// redirect would carry.
+fn step_up_required(amr_values: Option<&str>, max_age: Option<&str>) -> Response<ProxyBody> {
+    let mut challenge = String::from("Bearer error=\"insufficient_user_authentication\"");
+    if let Some(v) = amr_values {
+        // `amr` values are config strings; quotes would break the challenge.
+        challenge.push_str(&format!(", amr_values=\"{}\"", v.replace('"', "")));
+    }
+    if let Some(v) = max_age {
+        challenge.push_str(&format!(", max_age={v}"));
+    }
     Response::builder()
         .status(StatusCode::UNAUTHORIZED)
         .header(http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
-        .header(http::header::WWW_AUTHENTICATE, challenge)
+        .header(
+            http::header::WWW_AUTHENTICATE,
+            http::HeaderValue::try_from(challenge)
+                .unwrap_or(http::HeaderValue::from_static("Bearer")),
+        )
         .header(http::header::CACHE_CONTROL, "no-store")
         .body(into_proxy_body(Full::new(Bytes::from_static(
             b"stronger or more recent authentication required\n",

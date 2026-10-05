@@ -366,6 +366,7 @@ Ties broken by config order.
 | `max_body_bytes` | u64     | Cap inbound body via Content-Length pre-check. 413 if exceeded.       |
 | `auth`           | string  | Name of an `[[auth]]` block.                                          |
 | `authorizer`     | string  | Name of an `[[authorizers]]` block. Runs after `auth` when both are set. |
+| `require`        | table   | Extra claim rules and step-up for this route, on top of `auth`. See [`[routes.require]`](#routesrequire). |
 | `preserve_host`  | bool    | Forward the client's `Host` to the upstream unchanged instead of rewriting it to the member's address. Like nginx `proxy_set_header Host $http_host` / Apache `ProxyPreserveHost On`. Needed by backends that check Host/Origin (e.g. Grafana). Default `false`. Applies to HTTP/1.1 upstreams; HTTP/2 derives `:authority` from the member address. |
 
 ### Required
@@ -373,6 +374,51 @@ Ties broken by config order.
 | Field      | Type    | Notes                                       |
 |------------|---------|---------------------------------------------|
 | `upstream` | string  | Name of an `[[upstreams]]` pool.            |
+
+### `[routes.require]`
+
+What this route needs beyond its `auth` block. The block says how to verify a
+token and what every token from that issuer must satisfy; `require` says what
+*this* route asks on top, so one block can serve routes with different needs.
+Requires `auth`. Unknown keys are rejected, so a typo can't silently drop a
+requirement.
+
+```toml
+[[routes]]
+hosts = ["admin-api.corp.example.test"]
+auth  = "corp"
+upstream = "admin-api"
+
+[routes.require]
+claim_contains       = { groups = "admin-api-users" }
+amr                  = ["hwk"]     # RFC 8176 method: hardware key
+max_auth_age_seconds = 43200       # authenticated within 12 hours
+```
+
+| Field                  | Type             | Failure | Notes |
+|------------------------|------------------|---------|-------|
+| `claim_equals`         | table            | 403     | As on `[[auth]]`, for this route only. |
+| `claim_contains`       | table            | 403     | As on `[[auth]]`, for this route only. |
+| `amr`                  | array of strings | step-up | Each value must be in the token's `amr` array. |
+| `max_auth_age_seconds` | u64              | step-up | The token's `auth_time` must be at most this old. Missing → fails. 60 s of future skew allowed. |
+
+Checks run in order: the block's claim rules, the route's claim rules, then
+`amr` and `max_auth_age_seconds`. Claim rules come first so nobody is asked to
+touch a hardware key for a route they can't use.
+
+**Step-up** means:
+
+- **Page loads** (with the block's `login_redirect` set) get a 302 to the
+  login URL with the route's requirements appended: `amr_values=<space-separated
+  amr>` and `max_age=<seconds>`, like the authorisation request parameters in
+  [RFC 9470](https://www.rfc-editor.org/rfc/rfc9470). The same parameters are
+  added to *every* login redirect from a route with `amr` or
+  `max_auth_age_seconds`, including first sign-in. The sign-in service can
+  then satisfy everything in one round trip.
+- **Everything else** gets a 401 with
+  `WWW-Authenticate: Bearer error="insufficient_user_authentication"`, plus
+  `amr_values="…"` and `max_age=…` when set. A single-page app can tell
+  "step up" apart from "not signed in" this way.
 
 ## `[[auth]]`
 
@@ -402,10 +448,8 @@ inject_headers = [
 | `algorithms`      | array of strings | `["RS256", "ES256", "EdDSA"]`  | Whitelist. Other algs in the token → 401.                                       |
 | `required_claims` | array of strings | `[]`                           | Claim names that must be present.                                               |
 | `inject_headers`  | array of mapping | `[]`                           | See below.                                                                      |
-| `claim_equals`    | table            | `{}`                           | Claim → required string / integer / bool. Mismatch or absent → 403. [Details](#claim-policy-and-step-up). |
+| `claim_equals`    | table            | `{}`                           | Claim → required string / integer / bool, for every use of the block. Mismatch or absent → 403. [Details](#claim-rules). |
 | `claim_contains`  | table            | `{}`                           | Claim → value an array claim must contain (or a string claim must have as a space-separated token). → 403. |
-| `required_amr`    | array of strings | `[]`                           | Each must be in the token's `amr` array. Missing → 401 step-up (or redirect).  |
-| `max_auth_age_seconds` | u64         | unset                          | `auth_time` must be at most this old. Stale / absent → 401 step-up (or redirect). |
 | `token_cookie`    | string           | unset                          | Read the token from this cookie instead of `Authorization`. [Details](#browser-sessions). Routes only. |
 | `forward_token_cookie` | bool        | `false`                        | Forward the session cookie upstream. By default it is removed from `Cookie`.   |
 | `login_redirect`  | URL template     | unset                          | Where browsers are sent to sign in; `{url}` is the encoded original URL. Routes only. |
@@ -433,30 +477,19 @@ Value coercion when injecting:
 | array mixed / object | JSON-encoded                    |
 | null / missing (and not required) | header dropped     |
 
-### Claim policy and step-up
+### Claim rules
 
-Checks run in this order, after the signature, `iss`, `aud`, `exp` and
-`required_claims`:
-
-1. **`claim_equals` / `claim_contains`** - authorisation. Is this user allowed
-   on this route at all? Failure is a 403, never a redirect: signing in again
-   wouldn't change the answer.
-2. **`required_amr` / `max_auth_age_seconds`** - authentication strength and
-   recency. Did the user prove themselves strongly enough, recently enough?
-   Failure is a 401 with an [RFC 9470](https://www.rfc-editor.org/rfc/rfc9470)
-   step-up challenge, or a redirect to `login_redirect` for page loads.
-
-Policy runs first so nobody is asked to touch a hardware key for a route they
-can't use anyway.
+`claim_equals` and `claim_contains` on a block are what **every** token from
+that issuer must satisfy wherever the block is used, including
+`[egress.auth]`. A typical example is the organisation's domain. Rules for a
+single route go in [`[routes.require]`](#routesrequire), which also holds
+step-up.
 
 ```toml
 [[auth]]
-name                 = "corp-hwk"
+name           = "corp"
 # ...jwks_url / issuer / audience...
-claim_equals         = { hd = "example.com" }
-claim_contains       = { groups = "admin-api-users" }
-required_amr         = ["hwk"]          # RFC 8176 method: hardware key
-max_auth_age_seconds = 43200            # touched within 12 hours
+claim_equals   = { hd = "example.test", email_verified = true }
 ```
 
 - `claim_equals` compares by type: `true` does not match the string `"true"`,
@@ -464,14 +497,8 @@ max_auth_age_seconds = 43200            # touched within 12 hours
 - `claim_contains` on an array (`groups = ["a", "b"]`) matches an element; on a
   string (`scope = "read write"`) it matches a whole space-separated token, so
   `write` matches but `writ` does not.
-- `max_auth_age_seconds` allows `auth_time` up to 60 s in the future for clock
-  skew, the same leeway as `exp`.
-- Step-up 401s carry
-  `WWW-Authenticate: Bearer error="insufficient_user_authentication"` (plus
-  `max_age=<n>` when `max_auth_age_seconds` is set), so a single-page app can
-  tell "step up" apart from "not signed in".
-
-These checks also apply when the block is used by `[egress.auth]`.
+- Failure is a 403, never a login redirect: a fresh token from the same
+  issuer wouldn't change the answer.
 
 ### Browser sessions
 
@@ -483,13 +510,13 @@ a session JWT in a cookie, and quik checks it on every request. See
 ```toml
 [[auth]]
 name           = "corp"
-jwks_url       = "https://auth.corp.example.com/.well-known/jwks.json"
-issuer         = "https://auth.corp.example.com"
+jwks_url       = "https://auth.corp.example.test/.well-known/jwks.json"
+issuer         = "https://auth.corp.example.test"
 audience       = "corp"
 algorithms     = ["ES256"]
 token_cookie   = "__Secure-corp_session"
-login_redirect = "https://auth.corp.example.com/login?rd={url}"
-claim_equals   = { hd = "example.com" }
+login_redirect = "https://auth.corp.example.test/login?rd={url}"
+claim_equals   = { hd = "example.test" }
 inject_headers = [{ claim = "email", header = "x-auth-email", required = true }]
 ```
 
@@ -500,13 +527,15 @@ inject_headers = [{ claim = "email", header = "x-auth-email", required = true }]
   forwarding (other cookies are kept), so backends never see the session
   token. Set `forward_token_cookie = true` to keep it.
 - **Login redirect.** When signing in again could help - no token, a malformed,
-  expired or unverifiable one, or a failed step-up check - a **page load** gets
+  expired or unverifiable one, or a failed `[routes.require]` step-up check - a **page load** gets
   `302 Found` to `login_redirect` with `Cache-Control: no-store`. A page load
   is a GET/HEAD with `Sec-Fetch-Mode: navigate` or, from clients that don't
   send fetch metadata, `Accept: text/html`. Everything else (`fetch`, XHR,
   scripts, POSTs) gets the 401/403 it would without a redirect.
 - **`{url}`** becomes the percent-encoded `https://<host><path>?<query>` of the
-  original request, before `strip_prefix`. The host comes from the client, so
+  original request, before `strip_prefix`. Step-up parameters are appended to
+  the query (see [`[routes.require]`](#routesrequire)), so the template must
+  not contain a fragment (`#`). The host comes from the client, so
   **the sign-in service must check the return URL against its own allow-list**
   before redirecting back to it.
 - Without `login_redirect`, a missing session is a 401 and an expired one a

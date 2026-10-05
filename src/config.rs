@@ -211,26 +211,16 @@ pub struct AuthBlockConfig {
     pub inject_headers: Vec<ClaimHeaderMapping>,
 
     // ── authorisation: claim values ──────────────────────────────────────────
-    /// Claims that must equal a given string / integer / bool (e.g.
-    /// `{ hd = "example.com" }`). Failure → 403.
+    /// Claims every token from this issuer must satisfy, on every route (and
+    /// egress) using the block - e.g. `{ hd = "example.test" }`. Per-route
+    /// additions go in `[routes.require]`. Failure → 403.
     #[serde(default)]
     pub claim_equals: std::collections::BTreeMap<String, ClaimValue>,
-    /// Claims that must contain a value: an array claim must have it as an
-    /// element; a string claim must have it as a whitespace-separated token
-    /// (so OAuth `scope` works). Failure → 403.
+    /// Like `claim_equals`, but the claim must *contain* the value: an array
+    /// claim as an element, a string claim as a whitespace-separated token (so
+    /// OAuth `scope` works). Failure → 403.
     #[serde(default)]
     pub claim_contains: std::collections::BTreeMap<String, String>,
-
-    // ── authentication strength / recency (step-up) ──────────────────────────
-    /// Every listed value must appear in the token's `amr` array (RFC 8176
-    /// authentication methods, e.g. `["hwk"]`). Failure → re-authentication
-    /// (401, or a redirect to `login_redirect`).
-    #[serde(default)]
-    pub required_amr: Vec<String>,
-    /// The token's `auth_time` must be no older than this. A missing
-    /// `auth_time` fails. Failure → re-authentication.
-    #[serde(default)]
-    pub max_auth_age_seconds: Option<u64>,
 
     // ── browser sessions ─────────────────────────────────────────────────────
     /// Read the token from this cookie instead of `Authorization: Bearer`.
@@ -1051,8 +1041,36 @@ pub struct RouteConfig {
     /// Host/Origin (e.g. Grafana's CSRF check). Off by default.
     #[serde(default)]
     pub preserve_host: bool,
+    /// What this route needs on top of its `auth` block: extra claim values,
+    /// and authentication strength / recency (step-up). Requires `auth`.
+    #[serde(default)]
+    pub require: Option<RouteRequireConfig>,
 
     pub upstream: String,
+}
+
+/// `[routes.require]`: per-route requirements checked after the route's
+/// `[[auth]]` block has verified the token and applied its own claim rules.
+/// Claim rules fail with 403; `amr` / `max_auth_age_seconds` fail with a
+/// step-up (401, or a redirect to the block's `login_redirect` that tells the
+/// sign-in service what to ask for).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouteRequireConfig {
+    /// As `[[auth]] claim_equals`, for this route only.
+    #[serde(default)]
+    pub claim_equals: std::collections::BTreeMap<String, ClaimValue>,
+    /// As `[[auth]] claim_contains`, for this route only.
+    #[serde(default)]
+    pub claim_contains: std::collections::BTreeMap<String, String>,
+    /// Every listed value must appear in the token's `amr` array (RFC 8176
+    /// authentication methods, e.g. `["hwk"]`).
+    #[serde(default)]
+    pub amr: Vec<String>,
+    /// The token's `auth_time` must be no older than this. A missing
+    /// `auth_time` fails.
+    #[serde(default)]
+    pub max_auth_age_seconds: Option<u64>,
 }
 
 impl RouteConfig {
@@ -1286,18 +1304,28 @@ fn validate_authorizer_cache(a: &AuthorizerConfig) -> Result<()> {
 /// The placeholder `login_redirect` substitutes with the original request URL.
 pub const LOGIN_REDIRECT_URL_PLACEHOLDER: &str = "{url}";
 
-fn validate_auth_block(a: &AuthBlockConfig) -> Result<()> {
-    for k in a.claim_equals.keys().chain(a.claim_contains.keys()) {
+fn validate_claim_rules<'a>(keys: impl Iterator<Item = &'a String>) -> Result<()> {
+    for k in keys {
         if k.is_empty() {
             anyhow::bail!("claim_equals / claim_contains key must not be empty");
         }
     }
-    if a.required_amr.iter().any(|m| m.is_empty()) {
-        anyhow::bail!("required_amr entries must not be empty");
+    Ok(())
+}
+
+fn validate_route_require(r: &RouteRequireConfig) -> Result<()> {
+    validate_claim_rules(r.claim_equals.keys().chain(r.claim_contains.keys()))?;
+    if r.amr.iter().any(|m| m.is_empty()) {
+        anyhow::bail!("require.amr entries must not be empty");
     }
-    if a.max_auth_age_seconds == Some(0) {
-        anyhow::bail!("max_auth_age_seconds must be > 0");
+    if r.max_auth_age_seconds == Some(0) {
+        anyhow::bail!("require.max_auth_age_seconds must be > 0");
     }
+    Ok(())
+}
+
+fn validate_auth_block(a: &AuthBlockConfig) -> Result<()> {
+    validate_claim_rules(a.claim_equals.keys().chain(a.claim_contains.keys()))?;
     if let Some(c) = &a.token_cookie {
         // RFC 6265 cookie-name = token (RFC 7230 tchar).
         let tchar = |b: u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b);
@@ -1312,13 +1340,18 @@ fn validate_auth_block(a: &AuthBlockConfig) -> Result<()> {
         // absolute http(s) URL that is also a legal `Location` header value.
         let sample = t.replace(
             LOGIN_REDIRECT_URL_PLACEHOLDER,
-            "https%3A%2F%2Fexample.com%2F",
+            "https%3A%2F%2Fexample.test%2F",
         );
         let uri: http::Uri = sample
             .parse()
             .with_context(|| format!("login_redirect '{t}' is not a valid URL"))?;
         if !matches!(uri.scheme_str(), Some("http") | Some("https")) || uri.host().is_none() {
             anyhow::bail!("login_redirect '{t}' must be an absolute http:// or https:// URL");
+        }
+        // quik appends step-up parameters to the query; a fragment would
+        // swallow them.
+        if t.contains('#') {
+            anyhow::bail!("login_redirect '{t}' must not contain a fragment ('#')");
         }
         http::HeaderValue::try_from(sample)
             .with_context(|| format!("login_redirect '{t}' is not a valid header value"))?;
@@ -1454,6 +1487,15 @@ fn validate(cfg: &Config) -> Result<()> {
             && !auth_names.contains(a.as_str())
         {
             anyhow::bail!("route '{}' references unknown auth '{}'", r.summary(), a);
+        }
+        if let Some(req) = &r.require {
+            if r.auth.is_none() {
+                anyhow::bail!(
+                    "route '{}': require needs an auth block to check claims against",
+                    r.summary()
+                );
+            }
+            validate_route_require(req).with_context(|| format!("route '{}'", r.summary()))?;
         }
         if let Some(z) = &r.authorizer {
             let Some(authz) = cfg.authorizers.iter().find(|x| &x.name == z) else {
@@ -2042,16 +2084,26 @@ hosts = ["api.openai.com"]
         Ok(cfg)
     }
 
+    fn with_route_require(require: &str) -> Result<Config> {
+        let s = format!(
+            "{MIN}\n[[upstreams]]\nname=\"a\"\nmembers=[{{address=\"127.0.0.1:1\"}}]\n\
+             [[auth]]\nname=\"corp\"\njwks_url=\"https://auth/jwks\"\n\
+             [[routes]]\npath_prefix=\"/\"\nupstream=\"a\"\nauth=\"corp\"\n\
+             [routes.require]\n{require}\n"
+        );
+        let cfg: Config = toml::from_str(&s)?;
+        validate(&cfg)?;
+        Ok(cfg)
+    }
+
     #[test]
-    fn parses_browser_session_and_step_up_fields() {
+    fn parses_browser_session_fields_and_block_claim_rules() {
         let cfg = with_auth_block(
             r#"
-token_cookie         = "__Secure-corp_session"
-login_redirect       = "https://auth.corp.example.com/login?rd={url}&step_up=hwk"
-claim_equals         = { hd = "example.com", email_verified = true, tier = 2 }
-claim_contains       = { groups = "admin-api-users" }
-required_amr         = ["hwk"]
-max_auth_age_seconds = 43200
+token_cookie   = "__Secure-corp_session"
+login_redirect = "https://auth.corp.example.test/login?rd={url}"
+claim_equals   = { hd = "example.test", email_verified = true, tier = 2 }
+claim_contains = { groups = "staff" }
 "#,
         )
         .unwrap();
@@ -2060,12 +2112,27 @@ max_auth_age_seconds = 43200
         assert!(!a.forward_token_cookie);
         assert_eq!(
             a.claim_equals["hd"],
-            ClaimValue::String("example.com".into())
+            ClaimValue::String("example.test".into())
         );
         assert_eq!(a.claim_equals["email_verified"], ClaimValue::Bool(true));
         assert_eq!(a.claim_equals["tier"], ClaimValue::Integer(2));
-        assert_eq!(a.required_amr, vec!["hwk"]);
-        assert_eq!(a.max_auth_age_seconds, Some(43200));
+        assert_eq!(a.claim_contains["groups"], "staff");
+    }
+
+    #[test]
+    fn parses_route_require() {
+        let cfg = with_route_require(
+            r#"
+claim_contains       = { groups = "admin-api-users" }
+amr                  = ["hwk"]
+max_auth_age_seconds = 43200
+"#,
+        )
+        .unwrap();
+        let r = cfg.routes[0].require.as_ref().unwrap();
+        assert_eq!(r.claim_contains["groups"], "admin-api-users");
+        assert_eq!(r.amr, vec!["hwk"]);
+        assert_eq!(r.max_auth_age_seconds, Some(43200));
     }
 
     #[test]
@@ -2076,12 +2143,41 @@ max_auth_age_seconds = 43200
             ("forward_token_cookie = true", "requires token_cookie"),
             (r#"login_redirect = "/login?rd={url}""#, "absolute"),
             (r#"login_redirect = "ftp://auth/login""#, "absolute"),
-            ("max_auth_age_seconds = 0", "max_auth_age_seconds"),
-            (r#"required_amr = [""]"#, "required_amr"),
+            (r#"login_redirect = "https://auth/login#x""#, "fragment"),
+            (r#"claim_equals = { "" = "x" }"#, "must not be empty"),
         ] {
             let err = with_auth_block(extra).unwrap_err();
             assert!(format!("{err:#}").contains(needle), "{extra}: {err:#}");
         }
+    }
+
+    #[test]
+    fn rejects_bad_route_require() {
+        for (extra, needle) in [
+            ("max_auth_age_seconds = 0", "max_auth_age_seconds"),
+            (r#"amr = [""]"#, "amr"),
+            (r#"claim_contains = { "" = "x" }"#, "must not be empty"),
+            // A typo must not silently drop a security requirement.
+            (r#"amrs = ["hwk"]"#, "unknown field"),
+        ] {
+            let err = with_route_require(extra).unwrap_err();
+            assert!(format!("{err:#}").contains(needle), "{extra}: {err:#}");
+        }
+    }
+
+    #[test]
+    fn route_require_needs_an_auth_block() {
+        let s = format!(
+            "{MIN}\n[[upstreams]]\nname=\"a\"\nmembers=[{{address=\"127.0.0.1:1\"}}]\n\
+             [[routes]]\npath_prefix=\"/\"\nupstream=\"a\"\n\
+             [routes.require]\namr=[\"hwk\"]\n"
+        );
+        let cfg: Config = toml::from_str(&s).unwrap();
+        let err = validate(&cfg).unwrap_err();
+        assert!(
+            err.to_string().contains("require needs an auth block"),
+            "{err}"
+        );
     }
 
     #[test]

@@ -23,8 +23,10 @@ use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, DecodingKey, TokenData, Validation, decode, decode_header};
 use tokio::sync::Mutex;
 
-use crate::config::{AuthBlockConfig, ClaimHeaderMapping, ClaimValue};
+use crate::config::{AuthBlockConfig, ClaimHeaderMapping};
 use crate::upstream::{ProxyBody, ProxyClient, into_proxy_body};
+
+use super::policy::Requirements;
 
 #[derive(Debug)]
 pub enum AuthError {
@@ -41,7 +43,7 @@ pub enum AuthError {
     /// A `claim_equals` / `claim_contains` rule failed (authorisation: 403).
     ClaimMismatch(String),
     /// The token is valid but its authentication is too weak or too old for
-    /// this route (`required_amr` / `max_auth_age_seconds`): step up.
+    /// this route (`[routes.require]` `amr` / `max_auth_age_seconds`): step up.
     InsufficientAuthentication(String),
     /// Client tried to set a header name reserved for `inject_headers`.
     /// Carries the offending header name for diagnostic logging.
@@ -110,10 +112,8 @@ pub struct AuthValidator {
     algorithms: Vec<Algorithm>,
     required_claims: HashSet<String>,
     inject_headers: Vec<CompiledMapping>,
-    claim_equals: Vec<(String, ClaimValue)>,
-    claim_contains: Vec<(String, String)>,
-    required_amr: Vec<String>,
-    max_auth_age_secs: Option<u64>,
+    /// The block's own claim rules, applied wherever the block is used.
+    policy: Requirements,
     /// Browser-session settings; routes only (see [`BrowserSession`]).
     pub session: BrowserSession,
 }
@@ -159,18 +159,7 @@ impl AuthValidator {
             algorithms,
             required_claims: cfg.required_claims.iter().cloned().collect(),
             inject_headers,
-            claim_equals: cfg
-                .claim_equals
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-            claim_contains: cfg
-                .claim_contains
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-            required_amr: cfg.required_amr.clone(),
-            max_auth_age_secs: cfg.max_auth_age_seconds,
+            policy: Requirements::from_block(cfg),
             session: BrowserSession {
                 token_cookie: cfg.token_cookie.clone(),
                 strip_token_cookie: cfg.token_cookie.is_some() && !cfg.forward_token_cookie,
@@ -181,10 +170,9 @@ impl AuthValidator {
 
     /// Validate a token. On a kid cache miss, attempts a single async refresh
     /// of the JWKS and retries. Allow only when signature + standard claims
-    /// (`iss`/`aud`/`exp`) check out, every required claim is present, the
-    /// claim-value policy holds and the authentication is strong and recent
-    /// enough. Policy (403) is checked before strength (step-up) so a user is
-    /// never sent to step up for a route they couldn't use anyway.
+    /// (`iss`/`aud`/`exp`) check out, every required claim is present and the
+    /// block's own claim rules hold. Route requirements are separate - see
+    /// [`validate_and_inject`](Self::validate_and_inject).
     pub async fn validate(&self, token: &str) -> Result<Claims, AuthError> {
         let header = decode_header(token).map_err(|_| AuthError::MalformedToken)?;
         if !self.algorithms.contains(&header.alg) {
@@ -229,79 +217,26 @@ impl AuthValidator {
             }
         }
 
-        self.check_claim_policy(&data.claims)?;
-        self.check_authentication(&data.claims, unix_now())?;
+        self.policy.check(&data.claims)?;
 
         Ok(data.claims)
     }
 
-    fn check_claim_policy(&self, claims: &Claims) -> Result<(), AuthError> {
-        for (name, want) in &self.claim_equals {
-            if !claim_equals(claims.get(name.as_str()), want) {
-                return Err(AuthError::ClaimMismatch(format!(
-                    "claim '{name}' does not equal the required value"
-                )));
-            }
-        }
-        for (name, want) in &self.claim_contains {
-            if !claim_contains(claims.get(name.as_str()), want) {
-                return Err(AuthError::ClaimMismatch(format!(
-                    "claim '{name}' does not contain '{want}'"
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    fn check_authentication(&self, claims: &Claims, now: i64) -> Result<(), AuthError> {
-        for method in &self.required_amr {
-            if !claims
-                .get("amr")
-                .and_then(|v| v.as_array())
-                .is_some_and(|a| a.iter().any(|m| m.as_str() == Some(method)))
-            {
-                return Err(AuthError::InsufficientAuthentication(format!(
-                    "amr lacks '{method}'"
-                )));
-            }
-        }
-        if let Some(max_age) = self.max_auth_age_secs {
-            let Some(auth_time) = claims.get("auth_time").and_then(|v| v.as_i64()) else {
-                return Err(AuthError::InsufficientAuthentication(
-                    "missing auth_time".into(),
-                ));
-            };
-            // Same leeway jsonwebtoken gives `exp`, for small clock skew.
-            if auth_time > now + CLOCK_LEEWAY_SECS {
-                return Err(AuthError::InsufficientAuthentication(
-                    "auth_time is in the future".into(),
-                ));
-            }
-            if now - auth_time > max_age as i64 {
-                return Err(AuthError::InsufficientAuthentication(
-                    "auth_time older than max_auth_age_seconds".into(),
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    /// The `max_auth_age_seconds` this block enforces, for the step-up
-    /// `WWW-Authenticate` challenge (RFC 9470 `max_age`).
-    pub fn max_auth_age_secs(&self) -> Option<u64> {
-        self.max_auth_age_secs
-    }
-
-    /// Validate the bearer token, then write any configured claim-to-header
-    /// mappings into `headers`. Headers reserved by `inject_headers` are
-    /// always removed first so clients cannot spoof them. Returns the verified
-    /// claims (forwarded to an external authorizer when the route has one).
+    /// Validate the token, check the route's own requirements, then write any
+    /// configured claim-to-header mappings into `headers`. Headers reserved by
+    /// `inject_headers` are always removed first so clients cannot spoof them.
+    /// Returns the verified claims (forwarded to an external authorizer when
+    /// the route has one).
     pub async fn validate_and_inject(
         &self,
         token: &str,
         headers: &mut HeaderMap,
+        route: Option<&Requirements>,
     ) -> Result<Claims, AuthError> {
         let claims = self.validate(token).await?;
+        if let Some(r) = route {
+            r.check(&claims)?;
+        }
         self.apply_injector(headers, &claims)?;
         Ok(claims)
     }
@@ -358,34 +293,6 @@ impl AuthValidator {
             }
         }
         Ok(())
-    }
-}
-
-const CLOCK_LEEWAY_SECS: i64 = 60;
-
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-fn claim_equals(v: Option<&serde_json::Value>, want: &ClaimValue) -> bool {
-    match (v, want) {
-        (Some(serde_json::Value::String(s)), ClaimValue::String(w)) => s == w,
-        (Some(serde_json::Value::Bool(b)), ClaimValue::Bool(w)) => b == w,
-        (Some(serde_json::Value::Number(n)), ClaimValue::Integer(w)) => n.as_i64() == Some(*w),
-        _ => false,
-    }
-}
-
-/// Array claims match on an element; string claims on a whitespace-separated
-/// token (OAuth `scope = "read write"`). Anything else never matches.
-fn claim_contains(v: Option<&serde_json::Value>, want: &str) -> bool {
-    match v {
-        Some(serde_json::Value::Array(a)) => a.iter().any(|x| x.as_str() == Some(want)),
-        Some(serde_json::Value::String(s)) => s.split_ascii_whitespace().any(|t| t == want),
-        _ => false,
     }
 }
 

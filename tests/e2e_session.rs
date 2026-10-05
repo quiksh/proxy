@@ -1,18 +1,19 @@
 //! End-to-end tests for browser sessions on `[[auth]]` blocks: token from a
 //! cookie, session-cookie stripping, login redirects for page loads, claim
-//! value policy and step-up (`required_amr` / `max_auth_age_seconds`).
+//! value policy on the block and the route, and step-up via
+//! `[routes.require]` (`amr` / `max_auth_age_seconds`).
 
 mod common;
 
 use std::net::SocketAddr;
 
 use http::StatusCode;
-use quik::config::{AuthBlockConfig, ClaimValue, RouteConfig};
+use quik::config::{AuthBlockConfig, ClaimValue, RouteConfig, RouteRequireConfig};
 
 use common::{ProxySpec, TestJwtSigner};
 
 const COOKIE: &str = "__Secure-corp_session";
-const LOGIN: &str = "https://auth.corp.example.com/login?rd={url}";
+const LOGIN: &str = "https://auth.corp.example.test/login?rd={url}";
 
 fn now() -> i64 {
     std::time::SystemTime::now()
@@ -23,11 +24,11 @@ fn now() -> i64 {
 
 fn claims() -> serde_json::Value {
     serde_json::json!({
-        "iss": "https://auth.corp.example.com",
+        "iss": "https://auth.corp.example.test",
         "aud": "corp",
         "sub": "u-1",
-        "email": "alice@example.com",
-        "hd": "example.com",
+        "email": "alice@example.test",
+        "hd": "example.test",
         "groups": ["staff", "admin-api-users"],
         "scope": "read write",
         "amr": ["google", "hwk"],
@@ -52,7 +53,7 @@ fn session_block(jwks: SocketAddr) -> AuthBlockConfig {
     AuthBlockConfig {
         name: "corp".into(),
         jwks_url: format!("http://{jwks}/jwks.json"),
-        issuer: Some("https://auth.corp.example.com".into()),
+        issuer: Some("https://auth.corp.example.test".into()),
         audience: Some("corp".into()),
         algorithms: vec!["EdDSA".into()],
         token_cookie: Some(COOKIE.into()),
@@ -75,6 +76,14 @@ struct Harness {
 
 impl Harness {
     async fn new(tweak: impl FnOnce(&mut AuthBlockConfig)) -> Self {
+        Self::with_require(tweak, None).await
+    }
+
+    /// As [`new`](Self::new), with `[routes.require]` on the single route.
+    async fn with_require(
+        tweak: impl FnOnce(&mut AuthBlockConfig),
+        require: Option<RouteRequireConfig>,
+    ) -> Self {
         let signer = TestJwtSigner::with_kid("k1");
         let (jwks, _) = common::spawn_jwks_server(signer.jwks_json());
         let backend = common::Backend::spawn("app").await;
@@ -86,6 +95,7 @@ impl Harness {
                 routes: vec![RouteConfig {
                     path_prefix: Some("/".into()),
                     auth: Some("corp".into()),
+                    require,
                     upstream: "p".into(),
                     ..Default::default()
                 }],
@@ -114,7 +124,7 @@ impl Harness {
                 "https://localhost:{}{path}",
                 self.proxy.addr.port()
             ))
-            .header("host", "admin.corp.example.com")
+            .header("host", "admin.corp.example.test")
     }
 
     fn cookie(&self, claims: serde_json::Value) -> String {
@@ -145,7 +155,7 @@ async fn session_cookie_authenticates_and_is_stripped_upstream() {
     let calls = h.backend.calls();
     assert_eq!(calls.len(), 1);
     let hdrs = &calls[0].headers;
-    assert_eq!(hdrs.get("x-auth-email").unwrap(), "alice@example.com");
+    assert_eq!(hdrs.get("x-auth-email").unwrap(), "alice@example.test");
     // The app's own bearer token rides through untouched.
     assert_eq!(hdrs.get("authorization").unwrap(), "Bearer app-token-123");
     // The session token is quik's, not the app's.
@@ -185,7 +195,7 @@ async fn page_load_without_session_redirects_to_login_with_return_url() {
     assert_eq!(resp.status(), StatusCode::FOUND);
     assert_eq!(
         resp.headers().get("location").unwrap(),
-        "https://auth.corp.example.com/login?rd=https%3A%2F%2Fadmin.corp.example.com%2Freports%3Fq%3D1"
+        "https://auth.corp.example.test/login?rd=https%3A%2F%2Fadmin.corp.example.test%2Freports%3Fq%3D1"
     );
     assert_eq!(resp.headers().get("cache-control").unwrap(), "no-store");
     assert!(h.backend.calls().is_empty());
@@ -233,7 +243,7 @@ async fn expired_session_redirects_page_loads_and_403s_otherwise() {
 async fn claim_equals_mismatch_is_403_and_never_redirects() {
     let h = Harness::new(|b| {
         b.claim_equals
-            .insert("hd".into(), ClaimValue::String("example.com".into()));
+            .insert("hd".into(), ClaimValue::String("example.test".into()));
     })
     .await;
     let ok = h
@@ -244,7 +254,7 @@ async fn claim_equals_mismatch_is_403_and_never_redirects() {
         .unwrap();
     assert_eq!(ok.status(), StatusCode::OK);
 
-    let other_domain = h.cookie(with(claims(), "hd", "gmail.com".into()));
+    let other_domain = h.cookie(with(claims(), "hd", "other.invalid".into()));
     let resp = navigate(h.get("/"))
         .header("cookie", other_domain)
         .send()
@@ -319,13 +329,53 @@ async fn claim_contains_matches_array_elements_and_scope_tokens() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
+fn require_hwk() -> RouteRequireConfig {
+    RouteRequireConfig {
+        amr: vec!["hwk".into()],
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn route_claim_rules_add_to_the_block_rules() {
+    let h = Harness::with_require(
+        |b| {
+            b.claim_equals
+                .insert("hd".into(), ClaimValue::String("example.test".into()));
+        },
+        Some(RouteRequireConfig {
+            claim_contains: [("groups".to_string(), "admin-api-users".to_string())].into(),
+            ..Default::default()
+        }),
+    )
+    .await;
+    let ok = h
+        .get("/")
+        .header("cookie", h.cookie(claims()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+
+    // Block rule still applies on a route with its own rules...
+    let other_domain = h.cookie(with(claims(), "hd", "other.invalid".into()));
+    let resp = h
+        .get("/")
+        .header("cookie", other_domain)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // ...and so does the route's.
+    let no_group = h.cookie(with(claims(), "groups", serde_json::json!(["staff"])));
+    let resp = h.get("/").header("cookie", no_group).send().await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
 #[tokio::test]
 async fn missing_amr_steps_up_page_loads_and_challenges_api_calls() {
-    let h = Harness::new(|b| {
-        b.required_amr = vec!["hwk".into()];
-        b.login_redirect = Some(format!("{LOGIN}&step_up=hwk"));
-    })
-    .await;
+    let h = Harness::with_require(|_| {}, Some(require_hwk())).await;
     let google_only = h.cookie(with(claims(), "amr", serde_json::json!(["google"])));
 
     let page = navigate(h.get("/"))
@@ -338,7 +388,9 @@ async fn missing_amr_steps_up_page_loads_and_challenges_api_calls() {
         page.headers()["location"]
             .to_str()
             .unwrap()
-            .ends_with("&step_up=hwk")
+            .ends_with("%2F&amr_values=hwk"),
+        "{:?}",
+        page.headers()["location"]
     );
 
     let api = h
@@ -350,7 +402,7 @@ async fn missing_amr_steps_up_page_loads_and_challenges_api_calls() {
     assert_eq!(api.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(
         api.headers()["www-authenticate"],
-        "Bearer error=\"insufficient_user_authentication\""
+        "Bearer error=\"insufficient_user_authentication\", amr_values=\"hwk\""
     );
 
     let stepped_up = h
@@ -363,11 +415,51 @@ async fn missing_amr_steps_up_page_loads_and_challenges_api_calls() {
 }
 
 #[tokio::test]
+async fn first_sign_in_on_a_step_up_route_asks_for_everything_at_once() {
+    // No session at all: the redirect already carries the route's step-up
+    // requirements, so the user signs in and touches the key in one trip.
+    let h = Harness::with_require(
+        |_| {},
+        Some(RouteRequireConfig {
+            amr: vec!["hwk".into()],
+            max_auth_age_seconds: Some(900),
+            ..Default::default()
+        }),
+    )
+    .await;
+    let page = navigate(h.get("/x")).send().await.unwrap();
+    assert_eq!(page.status(), StatusCode::FOUND);
+    assert_eq!(
+        page.headers()["location"],
+        "https://auth.corp.example.test/login?rd=https%3A%2F%2Fadmin.corp.example.test%2Fx\
+         &amr_values=hwk&max_age=900"
+    );
+}
+
+#[tokio::test]
+async fn routes_without_require_ignore_step_up() {
+    // The same block on a route without `require` accepts a Google-only
+    // session - step-up is a route property, not an issuer property.
+    let h = Harness::new(|_| {}).await;
+    let google_only = h.cookie(with(claims(), "amr", serde_json::json!(["google"])));
+    let resp = h
+        .get("/")
+        .header("cookie", google_only)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn max_auth_age_requires_a_recent_auth_time() {
-    let h = Harness::new(|b| {
-        b.max_auth_age_seconds = Some(300);
-        b.login_redirect = None;
-    })
+    let h = Harness::with_require(
+        |b| b.login_redirect = None,
+        Some(RouteRequireConfig {
+            max_auth_age_seconds: Some(300),
+            ..Default::default()
+        }),
+    )
     .await;
     let fresh = h
         .get("/")
@@ -400,10 +492,14 @@ async fn max_auth_age_requires_a_recent_auth_time() {
 async fn claim_policy_is_checked_before_step_up() {
     // Not in the group *and* no hardware key: refuse outright rather than
     // making the user touch a key for a route they can't use.
-    let h = Harness::new(|b| {
-        b.claim_contains.insert("groups".into(), "admins".into());
-        b.required_amr = vec!["hwk".into()];
-    })
+    let h = Harness::with_require(
+        |_| {},
+        Some(RouteRequireConfig {
+            claim_contains: [("groups".to_string(), "admins".to_string())].into(),
+            amr: vec!["hwk".into()],
+            ..Default::default()
+        }),
+    )
     .await;
     let weak = h.cookie(with(claims(), "amr", serde_json::json!(["google"])));
     let resp = navigate(h.get("/"))

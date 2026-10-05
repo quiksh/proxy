@@ -8,6 +8,8 @@
 //! - [`authorizer`]: [`HttpAuthorizer`], an external HTTP service consulted
 //!   per request (`[[authorizers]]`, route field `authorizer = "..."`).
 //! - [`client`]: outbound HTTP clients for JWKS fetches and authorizers.
+//! - [`policy`]: claim rules and step-up checks ([`policy::Requirements`]),
+//!   for both `[[auth]]` blocks and `[routes.require]`.
 //! - [`session`]: browser sessions - token-from-cookie, stripping the session
 //!   cookie before forwarding, and login redirects for page loads.
 
@@ -15,6 +17,7 @@ mod authorizer;
 mod cache;
 mod client;
 mod jwt;
+pub mod policy;
 pub mod session;
 
 use std::collections::HashMap;

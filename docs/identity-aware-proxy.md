@@ -35,7 +35,7 @@ browser ──► LB ──► quik ──────────────�
 | Sign session JWTs, publish the JWKS, rotate keys | | ✓ |
 | Validate the return URL (`rd`), log out | | ✓ |
 | Verify the JWT signature, `iss`, `aud`, `exp` on every request | ✓ | |
-| Per-route policy: claim values, groups, `amr`, `auth_time` age | ✓ | |
+| Per-issuer and per-route policy: claim values, groups, `amr`, `auth_time` age | ✓ | |
 | Redirect page loads to sign in; 401/403 everything else | ✓ | |
 | Inject verified identity headers; strip the session cookie | ✓ | |
 
@@ -49,14 +49,14 @@ with your identity provider in one service you can replace.
 The sign-in service sets one cookie, named in `token_cookie`:
 
 ```
-Set-Cookie: __Secure-corp_session=<jwt>; Domain=corp.example.com; Path=/;
+Set-Cookie: __Secure-corp_session=<jwt>; Domain=corp.example.test; Path=/;
             Secure; HttpOnly; SameSite=Lax; Max-Age=28800
 ```
 
 - **`Domain`** must cover every host behind quik and **nothing else**. A cookie
   on a parent domain is sent to every subdomain - a marketing site or
   third-party-hosted page there could capture and replay the session. Use a
-  dedicated zone such as `corp.example.com`.
+  dedicated zone such as `corp.example.test`.
 - `HttpOnly` keeps it out of page scripts; `SameSite=Lax` stops other sites
   riding it on cross-site POSTs.
 - `Max-Age` should not exceed the JWT's `exp`.
@@ -92,56 +92,55 @@ quik redirects to `login_redirect` with `{url}` replaced by the
 percent-encoded original URL. The service must:
 
 1. **Validate `rd`** - absolute `https://` URL on an allow-listed host (for
-   example `*.corp.example.com`). Anything else is an open redirect.
+   example `*.corp.example.test`). Anything else is an open redirect.
 2. Sign the user in (skipping the IdP if a valid IdP session exists).
-3. Honour any static parameters in the template, e.g. `&step_up=hwk` meaning
-   "require a fresh hardware-key touch and include `hwk` in `amr`".
+3. Satisfy the step-up parameters quik appends for routes with
+   `[routes.require]`:
+   - `amr_values`: space-separated methods the session must include, for
+     example `hwk`. Perform each (such as a hardware-key touch) and add it to
+     `amr`.
+   - `max_age`: seconds. If the last interactive authentication is older than
+     this, authenticate again and set `auth_time` to now.
 4. Set the cookie and redirect to `rd`.
 
 ## Example: frontend with Google sign-in, API needs a hardware key
 
+One `[[auth]]` block describes the session: how to verify it, and what every
+session must satisfy. Each route adds what it needs with `[routes.require]`.
+
 ```toml
-# Session for any signed-in employee.
 [[auth]]
 name           = "corp"
-jwks_url       = "https://auth.corp.example.com/.well-known/jwks.json"
-issuer         = "https://auth.corp.example.com"
+jwks_url       = "https://auth.corp.example.test/.well-known/jwks.json"
+issuer         = "https://auth.corp.example.test"
 audience       = "corp"
 algorithms     = ["ES256"]
 token_cookie   = "__Secure-corp_session"
-login_redirect = "https://auth.corp.example.com/login?rd={url}"
-claim_equals   = { hd = "example.com" }
+login_redirect = "https://auth.corp.example.test/login?rd={url}"
+claim_equals   = { hd = "example.test" }
 inject_headers = [{ claim = "email", header = "x-auth-email", required = true }]
 
-# Same session, plus a group and a recent hardware-key touch.
-[[auth]]
-name                 = "corp-hwk"
-jwks_url             = "https://auth.corp.example.com/.well-known/jwks.json"
-issuer               = "https://auth.corp.example.com"
-audience             = "corp"
-algorithms           = ["ES256"]
-token_cookie         = "__Secure-corp_session"
-login_redirect       = "https://auth.corp.example.com/login?rd={url}&step_up=hwk"
-claim_equals         = { hd = "example.com" }
-claim_contains       = { groups = "admin-api-users" }
-required_amr         = ["hwk"]
-max_auth_age_seconds = 43200
-inject_headers       = [{ claim = "email", header = "x-auth-email", required = true }]
-
+# Any signed-in employee.
 [[routes]]
-hosts    = ["admin.corp.example.com"]
+hosts    = ["admin.corp.example.test"]
 auth     = "corp"
 upstream = "admin-frontend"
 
+# The API: in the group, with a hardware-key touch in the last 12 hours.
 [[routes]]
-hosts      = ["admin-api.corp.example.com"]
-methods    = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]
-auth       = "corp-hwk"
-upstream   = "admin-api"
+hosts    = ["admin-api.corp.example.test"]
+methods  = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]
+auth     = "corp"
+upstream = "admin-api"
+
+[routes.require]
+claim_contains       = { groups = "admin-api-users" }
+amr                  = ["hwk"]
+max_auth_age_seconds = 43200
 
 # CORS preflights carry no cookies: let them through to the API unauthenticated.
 [[routes]]
-hosts    = ["admin-api.corp.example.com"]
+hosts    = ["admin-api.corp.example.test"]
 methods  = ["OPTIONS"]
 upstream = "admin-api"
 ```
@@ -154,13 +153,13 @@ the API keeps its existing check as a second layer.
 | Situation | Page load | `fetch` / XHR / script |
 |---|---|---|
 | No session, or expired / unverifiable | 302 to sign-in | 401 (expired: 403) |
-| Signed in, but no `hwk` or `auth_time` too old | 302 to sign-in with `step_up=hwk` | 401 + `WWW-Authenticate: Bearer error="insufficient_user_authentication"` |
+| Signed in, but no `hwk` or `auth_time` too old | 302 to sign-in with `amr_values=hwk&max_age=43200` | 401 + `WWW-Authenticate: Bearer error="insufficient_user_authentication", amr_values="hwk", max_age=43200` |
 | Wrong domain or not in the group | 403 | 403 |
 
 A single-page app should treat a 401 from its API as "send the user to sign
-in": navigate the top-level window to the sign-in URL (with `step_up=hwk` when
-the challenge says `insufficient_user_authentication`) and `rd` set to the
-current page.
+in": navigate the top-level window to the sign-in URL with `rd` set to the
+current page. When the challenge says `insufficient_user_authentication`, copy
+its `amr_values` and `max_age` onto that URL.
 
 ## Checklist
 
@@ -169,7 +168,9 @@ current page.
       reach the app. quik already rejects clients that send them.
 - [ ] Cookie `Domain` scoped to a zone where every host is behind quik.
 - [ ] Sign-in service validates `rd` against an allow-list.
-- [ ] JWT lifetime in hours; `max_auth_age_seconds` on sensitive routes.
-- [ ] Group-restricted routes use `claim_contains`, not just a valid session.
+- [ ] JWT lifetime in hours; `[routes.require] max_auth_age_seconds` on
+      sensitive routes.
+- [ ] Group-restricted routes use `[routes.require] claim_contains`, not just
+      a valid session.
 - [ ] Routes that change state either need the app's own token or rely on
       `SameSite=Lax` + no cookie-only state changes on GET.
