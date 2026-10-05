@@ -1161,10 +1161,15 @@ async fn authenticate(
         }
         None => None,
     };
-    let Some(name) = ctx.authorizer_name else {
-        return Ok(InboundBody::Streaming(body));
+    let body = match ctx.authorizer_name {
+        Some(name) => apply_route_authorizer(auth, name, head, body, claims.as_ref(), &ctx).await?,
+        None => InboundBody::Streaming(body),
     };
-    apply_route_authorizer(auth, name, head, body, claims.as_ref(), &ctx).await
+    // SECURITY: after the modules that may read it, so a session cookie never
+    // reaches an upstream - including on routes that don't check it, where the
+    // browser still sends it because the cookie covers the whole host.
+    auth.strip_session_cookies(&mut head.headers, ctx.auth_name);
+    Ok(body)
 }
 
 /// Consult the route's external authorizer. Allow → write its headers into
@@ -1354,13 +1359,6 @@ async fn apply_route_auth(
     };
     match result {
         Ok(claims) => {
-            // SECURITY: the session token authenticates the user to quik, not
-            // to the app - don't hand it to every upstream.
-            if session.strip_token_cookie
-                && let Some(cookie) = &session.token_cookie
-            {
-                auth_session::strip_cookie(&mut head.headers, cookie);
-            }
             metrics::counter!("quik_auth_total", "auth" => name.to_owned(), "outcome" => "ok")
                 .increment(1);
             Ok(claims)

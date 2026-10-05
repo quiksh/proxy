@@ -124,8 +124,6 @@ pub struct AuthValidator {
 pub struct BrowserSession {
     /// Read the token from this cookie instead of `Authorization: Bearer`.
     pub token_cookie: Option<String>,
-    /// Remove `token_cookie` from `Cookie` before forwarding upstream.
-    pub strip_token_cookie: bool,
     /// `login_redirect` template; `{url}` is the encoded original URL.
     pub login_redirect: Option<String>,
 }
@@ -162,7 +160,6 @@ impl AuthValidator {
             policy: Requirements::from_block(cfg),
             session: BrowserSession {
                 token_cookie: cfg.token_cookie.clone(),
-                strip_token_cookie: cfg.token_cookie.is_some() && !cfg.forward_token_cookie,
                 login_redirect: cfg.login_redirect.clone(),
             },
         })

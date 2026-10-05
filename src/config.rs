@@ -229,8 +229,9 @@ pub struct AuthBlockConfig {
     /// only - an egress JWT block must not set it.
     #[serde(default)]
     pub token_cookie: Option<String>,
-    /// Forward the `token_cookie` cookie to the upstream. Default false: the
-    /// session token is removed from `Cookie` before forwarding.
+    /// Forward the `token_cookie` cookie to upstreams on this block's routes.
+    /// Default false: every configured session cookie is removed from
+    /// `Cookie` on every route before forwarding.
     #[serde(default)]
     pub forward_token_cookie: bool,
     /// Login URL to send browsers to when re-authentication would help

@@ -12,47 +12,61 @@ use http::{HeaderMap, HeaderValue, Method};
 
 use crate::config::LOGIN_REDIRECT_URL_PLACEHOLDER;
 
+/// The cookie pairs in one `Cookie` header value, as raw bytes. Works on bytes
+/// rather than `to_str()` so an unrelated cookie with non-ASCII (obs-text)
+/// bytes can't hide or drop the others.
+fn pairs(v: &HeaderValue) -> impl Iterator<Item = &[u8]> {
+    v.as_bytes().split(|&b| b == b';').map(<[u8]>::trim_ascii)
+}
+
+fn is_named(pair: &[u8], name: &str) -> bool {
+    pair.split(|&b| b == b'=')
+        .next()
+        .is_some_and(|k| k == name.as_bytes())
+        && pair.contains(&b'=')
+}
+
 /// The value of cookie `name`, searching every `Cookie` header (HTTP/2 clients
-/// may split cookies across several). First match wins. Empty values count as
-/// absent.
+/// may split cookies across several). First match wins. Empty or non-UTF-8
+/// values count as absent.
 pub fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers
         .get_all(COOKIE)
         .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(';'))
-        .find_map(|pair| {
-            let (k, v) = pair.trim().split_once('=')?;
-            (k == name && !v.is_empty()).then_some(v)
+        .flat_map(pairs)
+        .filter(|p| is_named(p, name))
+        .find_map(|p| {
+            let v = &p[name.len() + 1..];
+            (!v.is_empty())
+                .then(|| std::str::from_utf8(v).ok())
+                .flatten()
         })
 }
 
-/// Remove cookie `name` from every `Cookie` header, dropping headers left
-/// empty and leaving all other cookies untouched. No-op (and no allocation)
-/// when the cookie isn't present.
+/// Remove cookie `name` from every `Cookie` header. Headers that don't carry
+/// it are kept byte-for-byte; headers left empty are dropped. No-op (and no
+/// allocation) when the cookie isn't present.
 pub fn strip_cookie(headers: &mut HeaderMap, name: &str) {
-    let has = |pair: &str| pair.trim().split_once('=').is_some_and(|(k, _)| k == name);
-    let present = headers
-        .get_all(COOKIE)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .any(|v| v.split(';').any(has));
-    if !present {
+    let carries = |v: &HeaderValue| pairs(v).any(|p| is_named(p, name));
+    if !headers.get_all(COOKIE).iter().any(carries) {
         return;
     }
     let kept: Vec<HeaderValue> = headers
         .get_all(COOKIE)
         .iter()
-        .filter_map(|v| v.to_str().ok())
         .filter_map(|v| {
-            let rest: Vec<&str> = v
-                .split(';')
-                .map(str::trim)
-                .filter(|p| !p.is_empty() && !has(p))
+            if !carries(v) {
+                return Some(v.clone());
+            }
+            let rest: Vec<&[u8]> = pairs(v)
+                .filter(|p| !p.is_empty() && !is_named(p, name))
                 .collect();
-            (!rest.is_empty()).then(|| rest.join("; "))
+            if rest.is_empty() {
+                return None;
+            }
+            // Bytes came from a valid HeaderValue, so rejoining them is too.
+            HeaderValue::from_bytes(&rest.join(&b"; "[..])).ok()
         })
-        .filter_map(|v| HeaderValue::try_from(v).ok())
         .collect();
     headers.remove(COOKIE);
     for v in kept {
@@ -174,6 +188,27 @@ mod tests {
         let mut untouched = headers(&[("cookie", "sess_x=1;other=2")]);
         strip_cookie(&mut untouched, "sess");
         assert_eq!(untouched.get(COOKIE).unwrap(), "sess_x=1;other=2");
+    }
+
+    #[test]
+    fn non_ascii_cookies_neither_hide_nor_lose_others() {
+        let mut h = HeaderMap::new();
+        h.append(
+            COOKIE,
+            HeaderValue::from_bytes("lang=fr-\u{e9}; sess=tok".as_bytes()).unwrap(),
+        );
+        h.append(
+            COOKIE,
+            HeaderValue::from_bytes("city=K\u{f6}ln".as_bytes()).unwrap(),
+        );
+        assert_eq!(cookie_value(&h, "sess"), Some("tok"));
+
+        strip_cookie(&mut h, "sess");
+        let all: Vec<&[u8]> = h.get_all(COOKIE).iter().map(|v| v.as_bytes()).collect();
+        assert_eq!(
+            all,
+            vec!["lang=fr-\u{e9}".as_bytes(), "city=K\u{f6}ln".as_bytes()]
+        );
     }
 
     #[test]

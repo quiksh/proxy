@@ -451,7 +451,7 @@ inject_headers = [
 | `claim_equals`    | table            | `{}`                           | Claim → required string / integer / bool, for every use of the block. Mismatch or absent → 403. [Details](#claim-rules). |
 | `claim_contains`  | table            | `{}`                           | Claim → value an array claim must contain (or a string claim must have as a space-separated token). → 403. |
 | `token_cookie`    | string           | unset                          | Read the token from this cookie instead of `Authorization`. [Details](#browser-sessions). Routes only. |
-| `forward_token_cookie` | bool        | `false`                        | Forward the session cookie upstream. By default it is removed from `Cookie`.   |
+| `forward_token_cookie` | bool        | `false`                        | Forward the session cookie on this block's routes. By default it is removed from `Cookie` on every route. |
 | `login_redirect`  | URL template     | unset                          | Where browsers are sent to sign in; `{url}` is the encoded original URL. Routes only. |
 
 ### `inject_headers` mapping
@@ -523,9 +523,12 @@ inject_headers = [{ claim = "email", header = "x-auth-email", required = true }]
 - **Token source.** With `token_cookie` set, *only* that cookie is read. A
   bearer token in `Authorization` is ignored for authentication and forwarded
   upstream unchanged, so an app's own token can travel alongside the session.
-- **Cookie stripping.** The session cookie is removed from `Cookie` before
-  forwarding (other cookies are kept), so backends never see the session
-  token. Set `forward_token_cookie = true` to keep it.
+- **Cookie stripping.** Every `token_cookie` in the config is removed from
+  `Cookie` on **every** route before forwarding, including routes without
+  `auth` or with a different block. The browser sends the cookie to every path
+  on the host, so otherwise any upstream there could capture and replay the
+  session. Other cookies are kept byte for byte. The one exception is a route
+  whose own block sets `forward_token_cookie = true`.
 - **Login redirect.** When signing in again could help - no token, a malformed,
   expired or unverifiable one, or a failed `[routes.require]` step-up check - a **page load** gets
   `302 Found` to `login_redirect` with `Cache-Control: no-store`. A page load

@@ -532,3 +532,76 @@ async fn plain_bearer_block_does_not_redirect() {
         .unwrap();
     assert_eq!(ok.status(), StatusCode::OK);
 }
+
+/// SECURITY: the session cookie covers the whole host, so the browser sends it
+/// to every route - including ones that don't check it. No upstream may see
+/// it except through a block that forwards it on purpose.
+#[tokio::test]
+async fn session_cookie_is_stripped_on_routes_that_dont_check_it() {
+    let signer = TestJwtSigner::with_kid("k1");
+    let (jwks, _) = common::spawn_jwks_server(signer.jwks_json());
+    let open = common::Backend::spawn("open").await;
+    let other = common::Backend::spawn("other").await;
+    let keeps = common::Backend::spawn("keeps").await;
+
+    let mut forwarding = session_block(jwks);
+    forwarding.name = "corp-forward".into();
+    forwarding.forward_token_cookie = true;
+    let mut bearer = session_block(jwks);
+    bearer.name = "bearer".into();
+    bearer.token_cookie = None;
+    bearer.login_redirect = None;
+    bearer.inject_headers = vec![];
+
+    let route = |prefix: &str, auth: Option<&str>, upstream: &str| RouteConfig {
+        path_prefix: Some(prefix.into()),
+        auth: auth.map(Into::into),
+        upstream: upstream.into(),
+        ..Default::default()
+    };
+    let proxy = common::spawn_proxy_with_auth(
+        ProxySpec {
+            pools: vec![
+                common::Backends::http("open", vec![open.addr]),
+                common::Backends::http("other", vec![other.addr]),
+                common::Backends::http("keeps", vec![keeps.addr]),
+            ],
+            routes: vec![
+                route("/static", None, "open"),
+                route("/bearer", Some("bearer"), "other"),
+                route("/keeps", Some("corp-forward"), "keeps"),
+            ],
+        },
+        vec![session_block(jwks), forwarding, bearer],
+    )
+    .await;
+    let client = common::https_client_http1_only();
+    let session = format!("{COOKIE}={}", signer.sign(claims()));
+    let cookie = format!("theme=dark; {session}");
+    let get = |path: &str| {
+        client
+            .get(format!("https://localhost:{}{path}", proxy.addr.port()))
+            .header("cookie", &cookie)
+    };
+
+    assert_eq!(
+        get("/static").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    assert_eq!(open.calls()[0].headers.get("cookie").unwrap(), "theme=dark");
+
+    let resp = get("/bearer")
+        .header("authorization", format!("Bearer {}", signer.sign(claims())))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        other.calls()[0].headers.get("cookie").unwrap(),
+        "theme=dark"
+    );
+
+    // The forwarding block's own route is the one exception.
+    assert_eq!(get("/keeps").send().await.unwrap().status(), StatusCode::OK);
+    assert_eq!(keeps.calls()[0].headers.get("cookie").unwrap(), &cookie);
+}
