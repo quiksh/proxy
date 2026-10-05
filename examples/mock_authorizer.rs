@@ -21,8 +21,13 @@
 //!   x-mock-delay-ms: <ms>     sleep before responding (e.g. to test timeout_ms)
 //!
 //! Environment:
-//!   BIND_ADDR    (default: 127.0.0.1:9100)
-//!   AUTHZ_RULES  (default: built-in rules, printed at startup)
+//!   BIND_ADDR         (default: 127.0.0.1:9100)
+//!   AUTHZ_RULES       (default: built-in rules, printed at startup)
+//!   TLS_CERT/TLS_KEY  serve HTTPS with this PEM cert + key (default: plain HTTP)
+//!   TLS_CLIENT_CA     with TLS: require client certs chaining to this CA (mTLS)
+//!   CONNECTION_CLOSE  =1: send `Connection: close` on every response, forcing
+//!                     the caller to open (and handshake) a new connection per
+//!                     call - the worst case for TLS cost
 
 use std::collections::{BTreeMap, VecDeque};
 use std::convert::Infallible;
@@ -156,10 +161,18 @@ async fn main() -> Result<()> {
         recorded: Mutex::new(VecDeque::new()),
     });
 
+    let tls = tls_acceptor()?;
+    let close = std::env::var("CONNECTION_CLOSE").is_ok_and(|v| v == "1");
     let listener = TcpListener::bind(bind).await.context("binding listener")?;
     eprintln!(
-        "mock_authorizer listening on {bind} ({} rules from {source})",
-        state.rules.rules.len()
+        "mock_authorizer listening on {bind} ({} rules from {source}, {}{})",
+        state.rules.rules.len(),
+        match (&tls, std::env::var("TLS_CLIENT_CA").is_ok()) {
+            (None, _) => "http",
+            (Some(_), false) => "https",
+            (Some(_), true) => "https+mtls",
+        },
+        if close { ", connection: close" } else { "" }
     );
 
     loop {
@@ -172,19 +185,73 @@ async fn main() -> Result<()> {
         };
         let _ = stream.set_nodelay(true);
         let state = state.clone();
+        let tls = tls.clone();
         tokio::spawn(async move {
             let svc = service_fn(move |req: Request<Incoming>| {
                 let state = state.clone();
-                async move { Ok::<_, Infallible>(route(req, &state).await) }
+                async move {
+                    let mut resp = route(req, &state).await;
+                    if close {
+                        resp.headers_mut()
+                            .insert(http::header::CONNECTION, "close".parse().unwrap());
+                    }
+                    Ok::<_, Infallible>(resp)
+                }
             });
-            if let Err(e) = HyperServer::new(TokioExecutor::new())
-                .serve_connection(TokioIo::new(stream), svc)
-                .await
-            {
+            let result = match tls {
+                None => {
+                    HyperServer::new(TokioExecutor::new())
+                        .serve_connection(TokioIo::new(stream), svc)
+                        .await
+                }
+                Some(acceptor) => match acceptor.accept(stream).await {
+                    Ok(s) => {
+                        HyperServer::new(TokioExecutor::new())
+                            .serve_connection(TokioIo::new(s), svc)
+                            .await
+                    }
+                    Err(e) => {
+                        eprintln!("tls handshake from {peer} failed: {e}");
+                        return;
+                    }
+                },
+            };
+            if let Err(e) = result {
                 eprintln!("conn error from {peer}: {e}");
             }
         });
     }
+}
+
+/// TLS acceptor from TLS_CERT / TLS_KEY (and TLS_CLIENT_CA for mTLS), or
+/// `None` for plain HTTP.
+fn tls_acceptor() -> Result<Option<tokio_rustls::TlsAcceptor>> {
+    let (Ok(cert), Ok(key)) = (std::env::var("TLS_CERT"), std::env::var("TLS_KEY")) else {
+        return Ok(None);
+    };
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let certs = rustls_pemfile::certs(&mut std::fs::read(&cert)?.as_slice())
+        .collect::<Result<Vec<_>, _>>()
+        .context("parsing TLS_CERT")?;
+    let key = rustls_pemfile::private_key(&mut std::fs::read(&key)?.as_slice())
+        .context("parsing TLS_KEY")?
+        .context("no key in TLS_KEY")?;
+    let builder = rustls::ServerConfig::builder();
+    let builder = match std::env::var("TLS_CLIENT_CA") {
+        Ok(ca) => {
+            let mut roots = rustls::RootCertStore::empty();
+            for c in rustls_pemfile::certs(&mut std::fs::read(&ca)?.as_slice()) {
+                roots.add(c.context("parsing TLS_CLIENT_CA")?)?;
+            }
+            builder.with_client_cert_verifier(
+                rustls::server::WebPkiClientVerifier::builder(Arc::new(roots)).build()?,
+            )
+        }
+        Err(_) => builder.with_no_client_auth(),
+    };
+    let mut cfg = builder.with_single_cert(certs, key)?;
+    cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Ok(Some(tokio_rustls::TlsAcceptor::from(Arc::new(cfg))))
 }
 
 async fn route(req: Request<Incoming>, state: &State) -> Response<Full<Bytes>> {

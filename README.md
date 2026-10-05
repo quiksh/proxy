@@ -35,7 +35,8 @@ small HTTP admin API.
   strip it before forwarding, and redirect page loads to a sign-in service
   ([docs/identity-aware-proxy.md](docs/identity-aware-proxy.md)).
 - **External HTTP authorisers**: an alternative to API Gateway Lambda
-  authorisers without cold starts. quik POSTs a JSON summary of the request to
+  authorisers without cold starts. They can target an upstream pool for HA
+  (balancing, health checks, retries). quik POSTs a JSON summary of the request to
   your service, uses its status to allow or deny, and injects the headers it
   returns, restricted to an allowlist
   ([docs/config-reference.md](docs/config-reference.md#authorizers)). A mock
@@ -76,6 +77,18 @@ avoids per-request allocations where it can - metric handles are pre-built
 per upstream member, the in-flight counter is a single atomic, and bodies
 stream end-to-end without buffering. See `benches/hot_path.rs` for the
 microbenchmarks.
+
+**Throughput.** `scripts/bench-scaling.sh` uses `wrk` to sweep quik's worker
+threads × response size. It measures requests per second over reused
+connections, and connections per second with a full TCP + TLS handshake on
+every request. It also records quik's CPU time per request and a no-proxy
+ceiling for comparison. On an Apple M3 Pro laptop, with the load generator,
+quik and backend sharing the machine, quik used **~43 µs of CPU per 1 KB
+request** including TLS termination. That's about 23k requests/s per fully
+used core. Absolute throughput levels off at the laptop's loopback limit, so
+for real numbers run the script on Linux with the load generator on a
+separate host. `scripts/bench-authz-tls.sh` measures the cost of TLS and mTLS
+on the authoriser hop.
 
 ## Deployment scenarios
 

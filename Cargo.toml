@@ -41,10 +41,10 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 anyhow = "1"
 
-# JWT validation. getrandom underpins request-id and traceparent generation
-# (already pulled in transitively via rustls; promoted to a direct dep here).
+# JWT validation. `rand` (thread-local CSPRNG) generates request-id and
+# traceparent values without a syscall per ID.
 jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
-getrandom = "0.3"
+rand = "0.9"
 serde_json = "1"
 
 # Egress proxy: ipnet for CIDR matching, base64 for Basic auth decode.

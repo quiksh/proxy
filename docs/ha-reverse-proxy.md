@@ -279,6 +279,7 @@ Metrics on the admin listener at `/metrics`. The interesting ones:
 | `quik_authorizer_total`               | counter | `authorizer`, `outcome` |
 | `quik_authorizer_duration_seconds`    | histogram | `authorizer`      |
 | `quik_authorizer_cache_total`         | counter | `authorizer`, `result` |
+| `quik_authorizer_retries_total`       | counter | `authorizer`        |
 
 Logs: one access event per completed request at `target = quik::access`,
 INFO level, carrying `method`, `path`, `peer`, `request_id`, `status`,

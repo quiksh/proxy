@@ -185,6 +185,7 @@ mod tests {
             bytes_sent: metrics::counter!("test"),
             bytes_received: metrics::counter!("test"),
             inflight_gauge: metrics::gauge!("test"),
+            selected: metrics::counter!("test"),
         })
     }
 

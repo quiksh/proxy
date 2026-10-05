@@ -230,6 +230,8 @@ pub struct Upstream {
     pub bytes_sent: metrics::Counter,
     pub bytes_received: metrics::Counter,
     pub inflight_gauge: metrics::Gauge,
+    /// `quik_upstream_selected_total` for this member, bumped once per pick.
+    pub selected: metrics::Counter,
 }
 
 impl Upstream {
@@ -347,6 +349,24 @@ impl Drop for InflightGuard {
     }
 }
 
+/// Record a failed request against a member's passive health, emitting the
+/// ejection metric + log when this failure crosses the threshold. Shared by
+/// the forwarding path and pooled external authorizers.
+pub fn fire_failure(health: &crate::upstream::UpstreamHealth, pool_name: &str, member_name: &str) {
+    if health.record_failure() {
+        metrics::counter!("quik_upstream_ejections_total",
+            "pool" => pool_name.to_string(),
+            "member" => member_name.to_string()
+        )
+        .increment(1);
+        tracing::warn!(
+            pool = %pool_name,
+            member = %member_name,
+            "ejecting unhealthy upstream"
+        );
+    }
+}
+
 pub struct UpstreamPoolEntry {
     /// Pool name, mirrored from the config key so admin API handlers and
     /// metric labelling can read it without a reverse lookup through the map.
@@ -426,6 +446,11 @@ impl UpstreamPoolEntry {
             "pool" => self.name.clone(),
             "member" => member_label.clone(),
         );
+        let selected = metrics::counter!(
+            "quik_upstream_selected_total",
+            "pool" => self.name.clone(),
+            "member" => member_label.clone(),
+        );
         Ok(Upstream {
             name: member_label,
             address: m.address.clone(),
@@ -438,6 +463,7 @@ impl UpstreamPoolEntry {
             bytes_sent,
             bytes_received,
             inflight_gauge,
+            selected,
         })
     }
 }
@@ -509,6 +535,11 @@ fn build_pools(cfg: &Config) -> Result<HashMap<String, Arc<UpstreamPoolEntry>>> 
                 "pool" => u.name.clone(),
                 "member" => member_label.clone(),
             );
+            let selected = metrics::counter!(
+                "quik_upstream_selected_total",
+                "pool" => u.name.clone(),
+                "member" => member_label.clone(),
+            );
             members.push(Upstream {
                 name: member_label,
                 address: m.address.clone(),
@@ -521,6 +552,7 @@ fn build_pools(cfg: &Config) -> Result<HashMap<String, Arc<UpstreamPoolEntry>>> 
                 bytes_sent,
                 bytes_received,
                 inflight_gauge,
+                selected,
             });
         }
         let balancer: Box<dyn Balancer> = match u.balancer {
@@ -556,7 +588,8 @@ fn build_client(u: &UpstreamPoolConfig) -> Result<ProxyClient> {
 
     // ALPN is set by hyper-rustls via .enable_http1() / .enable_http2() below -
     // don't pre-populate alpn_protocols here (hyper-rustls panics if we do).
-    let tls_config = if u.tls.skip_verify {
+    let t = &u.tls;
+    let builder = if t.skip_verify {
         tracing::warn!(
             pool = %u.name,
             "skip_verify is enabled - upstream TLS certificates will not be checked"
@@ -564,13 +597,41 @@ fn build_client(u: &UpstreamPoolConfig) -> Result<ProxyClient> {
         ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(NoVerifier))
-            .with_no_client_auth()
     } else {
         let mut roots = rustls::RootCertStore::empty();
-        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth()
+        match &t.ca_path {
+            // A private CA replaces the public roots: members must chain to it.
+            Some(path) => {
+                let pem =
+                    std::fs::read(path).with_context(|| format!("reading tls.ca_path '{path}'"))?;
+                for cert in crate::tls::parse_certs(&pem)
+                    .with_context(|| format!("tls.ca_path '{path}'"))?
+                {
+                    roots
+                        .add(cert)
+                        .with_context(|| format!("adding CA from '{path}'"))?;
+                }
+            }
+            None => roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()),
+        }
+        ClientConfig::builder().with_root_certificates(roots)
+    };
+    let tls_config = match (&t.cert_path, &t.key_path) {
+        (Some(cert), Some(key)) => {
+            let cert_pem =
+                std::fs::read(cert).with_context(|| format!("reading tls.cert_path '{cert}'"))?;
+            let key_pem =
+                std::fs::read(key).with_context(|| format!("reading tls.key_path '{key}'"))?;
+            builder
+                .with_client_auth_cert(
+                    crate::tls::parse_certs(&cert_pem)
+                        .with_context(|| format!("tls.cert_path '{cert}'"))?,
+                    crate::tls::parse_key(&key_pem)
+                        .with_context(|| format!("tls.key_path '{key}'"))?,
+                )
+                .context("building client certificate (mTLS)")?
+        }
+        _ => builder.with_no_client_auth(),
     };
 
     let mut http = HttpConnector::new();
@@ -583,6 +644,15 @@ fn build_client(u: &UpstreamPoolConfig) -> Result<ProxyClient> {
     let alpn_stage = HttpsConnectorBuilder::new()
         .with_tls_config(tls_config)
         .https_or_http();
+    // Verify (and send SNI for) a fixed name rather than the member address.
+    let alpn_stage = match &t.server_name {
+        Some(name) => {
+            let name = rustls::pki_types::ServerName::try_from(name.clone())
+                .with_context(|| format!("invalid tls.server_name '{name}'"))?;
+            alpn_stage.with_server_name_resolver(hyper_rustls::FixedServerNameResolver::new(name))
+        }
+        None => alpn_stage,
+    };
     let https = match u.http_version {
         UpstreamHttpVersion::H1 => alpn_stage.enable_http1().wrap_connector(http),
         UpstreamHttpVersion::H2 => alpn_stage.enable_http2().wrap_connector(http),

@@ -59,7 +59,7 @@ use crate::headers::{
 };
 use crate::routing::SharedRoutingTable;
 use crate::shutdown::Coordinator;
-use crate::upstream::{CountingBody, InflightGuard, Pool, ProxyBody};
+use crate::upstream::{CountingBody, InflightGuard, Pool, ProxyBody, fire_failure};
 
 /// Per-request context that flows through the forward pipeline alongside the
 /// borrowed routing table / upstream pool. Cheap to clone (the policy is an
@@ -396,6 +396,7 @@ async fn forward_inner(
         &mut parts,
         body,
         AuthCtx {
+            upstreams,
             auth_name: auth_name.as_deref(),
             authorizer_name: authorizer_name.as_deref(),
             require: require.as_deref(),
@@ -439,11 +440,7 @@ async fn forward_inner(
     };
     drop(members_snap);
 
-    metrics::counter!("quik_upstream_selected_total",
-        "pool" => pool_name.clone(),
-        "member" => target.name.clone()
-    )
-    .increment(1);
+    target.selected.increment(1);
 
     // Inflight tracking + health recording. The Balancer already
     // incremented inflight when it picked the member; this guard only
@@ -654,21 +651,6 @@ fn error_chain<E: std::error::Error + ?Sized>(e: &E) -> String {
 /// the failure that crosses the ejection threshold, also fire the ejection
 /// counter + a warning log so operators can correlate. Keeps the metric
 /// call out of the steady-state success path.
-fn fire_failure(health: &crate::upstream::UpstreamHealth, pool_name: &str, member_name: &str) {
-    if health.record_failure() {
-        metrics::counter!("quik_upstream_ejections_total",
-            "pool" => pool_name.to_string(),
-            "member" => member_name.to_string()
-        )
-        .increment(1);
-        tracing::warn!(
-            pool = %pool_name,
-            member = %member_name,
-            "ejecting unhealthy upstream"
-        );
-    }
-}
-
 /// Extract the opt-in access-log field values from a request's headers. Each
 /// is `Some` only when configured and present (and a valid header string).
 /// Pure, so it's unit-testable without a tracing subscriber.
@@ -701,15 +683,32 @@ fn record_access_fields(headers: &HeaderMap, fields: &AccessLogFields) {
     }
 }
 
+/// `status` as a static metric label ("200", "404", ...), built once for
+/// 100-599 so `record_terminal` doesn't format a string per request.
+fn status_label(status: u16) -> metrics::SharedString {
+    static LABELS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    let labels = LABELS.get_or_init(|| {
+        (100u16..600)
+            .map(|s| &*Box::leak(s.to_string().into_boxed_str()))
+            .collect()
+    });
+    match status {
+        100..=599 => metrics::SharedString::const_str(labels[(status - 100) as usize]),
+        other => metrics::SharedString::from_owned(other.to_string()),
+    }
+}
+
 fn record_terminal(route: &Arc<str>, status: u16, start: Instant, upstream: Option<&str>) {
     let duration = start.elapsed();
+    // Labels without per-request allocation: the route label is a shared
+    // `Arc<str>` and the status string comes from a static table.
     metrics::counter!("quik_requests_total",
-        "route" => route.to_string(),
-        "status" => status.to_string()
+        "route" => metrics::SharedString::from_shared(route.clone()),
+        "status" => status_label(status)
     )
     .increment(1);
     metrics::histogram!("quik_request_duration_seconds",
-        "route" => route.to_string()
+        "route" => metrics::SharedString::from_shared(route.clone())
     )
     .record(duration.as_secs_f64());
 
@@ -896,6 +895,7 @@ async fn handle_ws_upgrade(
         &mut head,
         body,
         AuthCtx {
+            upstreams,
             auth_name: auth_name.as_deref(),
             authorizer_name: authorizer_name.as_deref(),
             require: require.as_deref(),
@@ -931,11 +931,7 @@ async fn handle_ws_upgrade(
     };
     drop(members_snap);
 
-    metrics::counter!("quik_upstream_selected_total",
-        "pool" => pool_name.clone(),
-        "member" => target.name.clone()
-    )
-    .increment(1);
+    target.selected.increment(1);
 
     let target_name = target.name.clone();
     let target_authority = target.authority.clone();
@@ -1130,6 +1126,8 @@ impl InboundBody {
 
 /// Per-request inputs to [`authenticate`].
 struct AuthCtx<'a> {
+    /// Live upstream pools, for authorizers that target a pool.
+    upstreams: &'a Pool,
     auth_name: Option<&'a str>,
     authorizer_name: Option<&'a str>,
     /// The route's `[routes.require]`, checked after the auth block.
@@ -1217,16 +1215,19 @@ async fn apply_route_authorizer(
         InboundBody::Streaming(_) => None,
     };
     let verdict = authz
-        .authorize(AuthzRequest {
-            method: &head.method,
-            uri: &head.uri,
-            headers: &head.headers,
-            source_ip: ctx.peer_ip,
-            route: ctx.route_label,
-            request_id: ctx.request_id,
-            claims,
-            body: buffered,
-        })
+        .authorize(
+            AuthzRequest {
+                method: &head.method,
+                uri: &head.uri,
+                headers: &head.headers,
+                source_ip: ctx.peer_ip,
+                route: ctx.route_label,
+                request_id: ctx.request_id,
+                claims,
+                body: buffered,
+            },
+            ctx.upstreams,
+        )
         .await;
     match verdict {
         Ok(AuthzVerdict::Allow(inject)) => {
