@@ -8,11 +8,17 @@
 //! - [`authorizer`]: [`HttpAuthorizer`], an external HTTP service consulted
 //!   per request (`[[authorizers]]`, route field `authorizer = "..."`).
 //! - [`client`]: outbound HTTP clients for JWKS fetches and authorizers.
+//! - [`policy`]: claim rules and step-up checks ([`policy::Requirements`]),
+//!   for both `[[auth]]` blocks and `[routes.require]`.
+//! - [`session`]: browser sessions - token-from-cookie, stripping the session
+//!   cookie before forwarding, and login redirects for page loads.
 
 mod authorizer;
 mod cache;
 mod client;
 mod jwt;
+pub mod policy;
+pub mod session;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -25,13 +31,24 @@ use crate::upstream::ProxyClient;
 
 pub use authorizer::{AuthzRequest, AuthzVerdict, HttpAuthorizer};
 pub use client::build_jwks_client_skip_verify;
-pub use jwt::{AuthError, AuthValidator, Claims, JwksCache};
+pub use jwt::{AuthError, AuthValidator, BrowserSession, Claims, JwksCache};
 
 use client::{build_authorizer_client, build_jwks_client};
 
 pub struct AuthRegistry {
     validators: HashMap<String, Arc<AuthValidator>>,
     authorizers: HashMap<String, Arc<HttpAuthorizer>>,
+    /// Every `token_cookie` in config. Stripped from requests on *all* routes,
+    /// not just the ones that check it, so no upstream receives a session
+    /// token it could replay. Empty unless browser sessions are configured.
+    session_cookies: Vec<SessionCookie>,
+}
+
+struct SessionCookie {
+    name: String,
+    /// Blocks with `forward_token_cookie = true` for this cookie: routes using
+    /// one of them keep it.
+    forwarded_by: Vec<String>,
 }
 
 impl AuthRegistry {
@@ -39,6 +56,7 @@ impl AuthRegistry {
         Self {
             validators: HashMap::new(),
             authorizers: HashMap::new(),
+            session_cookies: Vec::new(),
         }
     }
 
@@ -76,9 +94,29 @@ impl AuthRegistry {
                 .with_context(|| format!("building authorizer '{}'", z.name))?;
             authorizers.insert(z.name.clone(), Arc::new(a));
         }
+        let mut session_cookies: Vec<SessionCookie> = Vec::new();
+        for a in &cfg.auth {
+            let Some(name) = &a.token_cookie else {
+                continue;
+            };
+            let entry = match session_cookies.iter_mut().position(|c| &c.name == name) {
+                Some(i) => &mut session_cookies[i],
+                None => {
+                    session_cookies.push(SessionCookie {
+                        name: name.clone(),
+                        forwarded_by: Vec::new(),
+                    });
+                    session_cookies.last_mut().expect("just pushed")
+                }
+            };
+            if a.forward_token_cookie {
+                entry.forwarded_by.push(a.name.clone());
+            }
+        }
         Ok(Self {
             validators,
             authorizers,
+            session_cookies,
         })
     }
 
@@ -88,6 +126,18 @@ impl AuthRegistry {
 
     pub fn get_authorizer(&self, name: &str) -> Option<Arc<HttpAuthorizer>> {
         self.authorizers.get(name).cloned()
+    }
+
+    /// SECURITY: remove every configured session cookie from `headers`,
+    /// except one the route's own block (`route_auth`) forwards on purpose.
+    /// No-op when no block uses `token_cookie`.
+    pub fn strip_session_cookies(&self, headers: &mut http::HeaderMap, route_auth: Option<&str>) {
+        for c in &self.session_cookies {
+            if route_auth.is_some_and(|a| c.forwarded_by.iter().any(|f| f == a)) {
+                continue;
+            }
+            session::strip_cookie(headers, &c.name);
+        }
     }
 }
 
@@ -129,6 +179,11 @@ impl SharedAuthRegistry {
     /// Resolve an authorizer by name (single lock-free load + Arc clone).
     pub fn get_authorizer(&self, name: &str) -> Option<Arc<HttpAuthorizer>> {
         self.inner.load().get_authorizer(name)
+    }
+
+    /// See [`AuthRegistry::strip_session_cookies`]. One lock-free load.
+    pub fn strip_session_cookies(&self, headers: &mut http::HeaderMap, route_auth: Option<&str>) {
+        self.inner.load().strip_session_cookies(headers, route_auth);
     }
 
     /// Borrow the current registry as an `Arc`. Used at startup to seed the

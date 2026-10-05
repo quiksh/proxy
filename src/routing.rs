@@ -19,6 +19,7 @@ use anyhow::{Context, Result, bail};
 use arc_swap::ArcSwap;
 use http::Method;
 
+use crate::auth::policy::Requirements;
 use crate::config::{Config, RouteConfig};
 
 /// What a route uses to decide whether a given request applies.
@@ -134,6 +135,8 @@ pub struct RouteEntry {
     pub auth: Option<Arc<str>>,
     /// Optional `[[authorizers]]` name. None = no external authorizer.
     pub authorizer: Option<Arc<str>>,
+    /// `[routes.require]`, compiled. Checked after the auth block's own rules.
+    pub require: Option<Arc<Requirements>>,
     pub label: Arc<str>,
 }
 
@@ -260,6 +263,10 @@ fn build_table(routes: &[RouteConfig]) -> Result<RoutingTable> {
             upstream_pool: Arc::from(r.upstream.as_str()),
             auth: r.auth.as_deref().map(Arc::from),
             authorizer: r.authorizer.as_deref().map(Arc::from),
+            require: r
+                .require
+                .as_ref()
+                .map(|q| Arc::new(Requirements::from_route(q))),
             label,
         });
     }
@@ -344,6 +351,7 @@ mod tests {
             auth: None,
             authorizer: None,
             preserve_host: false,
+            require: None,
             upstream: r.up.to_owned(),
         }
     }

@@ -54,6 +54,11 @@ base64 = "0.22"
 # Admin API: sha2 for cert fingerprint in audit log (mTLS principal).
 sha2 = "0.10"
 
+# `[listener.tls] self_signed`: ephemeral boot-time cert for sitting behind a
+# load balancer that doesn't verify targets. `ring` is already linked via
+# jsonwebtoken, so this adds no new crypto backend.
+rcgen = "0.13"
+
 # Optional NATS service-registration watcher (behind the `nats` feature). The
 # default build links none of this. `kv`/`jetstream` for the registry;
 # `server_2_11` enables per-key TTL. Trim further once the feature set settles.
@@ -78,7 +83,6 @@ nats = ["dep:async-nats", "dep:futures"]
 # virtual-time tests (e.g. the shutdown phase sequencer). Unioned with the
 # normal tokio "full" dependency for test/bench builds only.
 tokio = { version = "1.40", features = ["full", "test-util"] }
-rcgen = "0.13"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "http2", "stream", "json"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 hdrhistogram = "7"

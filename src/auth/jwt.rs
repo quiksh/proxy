@@ -26,6 +26,8 @@ use tokio::sync::Mutex;
 use crate::config::{AuthBlockConfig, ClaimHeaderMapping};
 use crate::upstream::{ProxyBody, ProxyClient, into_proxy_body};
 
+use super::policy::Requirements;
+
 #[derive(Debug)]
 pub enum AuthError {
     MissingToken,
@@ -35,6 +37,14 @@ pub enum AuthError {
     DisallowedAlgorithm,
     InvalidSignature,
     InvalidClaims(String),
+    /// `exp` has passed. Rejected like other claim failures (403) on bearer
+    /// routes, but a fresh sign-in fixes it, so it can trigger a redirect.
+    Expired,
+    /// A `claim_equals` / `claim_contains` rule failed (authorisation: 403).
+    ClaimMismatch(String),
+    /// The token is valid but its authentication is too weak or too old for
+    /// this route (`[routes.require]` `amr` / `max_auth_age_seconds`): step up.
+    InsufficientAuthentication(String),
     /// Client tried to set a header name reserved for `inject_headers`.
     /// Carries the offending header name for diagnostic logging.
     SpoofedHeader(String),
@@ -52,6 +62,11 @@ impl std::fmt::Display for AuthError {
             AuthError::DisallowedAlgorithm => write!(f, "disallowed JWT algorithm"),
             AuthError::InvalidSignature => write!(f, "JWT signature verification failed"),
             AuthError::InvalidClaims(m) => write!(f, "JWT claim validation failed: {m}"),
+            AuthError::Expired => write!(f, "JWT expired"),
+            AuthError::ClaimMismatch(m) => write!(f, "JWT claim policy failed: {m}"),
+            AuthError::InsufficientAuthentication(m) => {
+                write!(f, "insufficient user authentication: {m}")
+            }
             AuthError::SpoofedHeader(h) => write!(f, "client supplied reserved header '{h}'"),
             AuthError::JwksFetch(m) => write!(f, "JWKS fetch failed: {m}"),
             AuthError::Other(m) => write!(f, "{m}"),
@@ -60,6 +75,26 @@ impl std::fmt::Display for AuthError {
 }
 
 impl std::error::Error for AuthError {}
+
+impl AuthError {
+    /// Whether signing in again could turn this rejection into an allow - the
+    /// cases a browser is redirected to `login_redirect` for. Wrong issuer /
+    /// audience, missing required claims, claim-policy failures and spoofed
+    /// headers are not: a new token from the same issuer wouldn't change them.
+    pub fn reauth_may_help(&self) -> bool {
+        matches!(
+            self,
+            AuthError::MissingToken
+                | AuthError::MalformedToken
+                | AuthError::MissingKid
+                | AuthError::UnknownKid
+                | AuthError::DisallowedAlgorithm
+                | AuthError::InvalidSignature
+                | AuthError::Expired
+                | AuthError::InsufficientAuthentication(_)
+        )
+    }
+}
 
 pub type Claims = serde_json::Value;
 
@@ -77,6 +112,20 @@ pub struct AuthValidator {
     algorithms: Vec<Algorithm>,
     required_claims: HashSet<String>,
     inject_headers: Vec<CompiledMapping>,
+    /// The block's own claim rules, applied wherever the block is used.
+    policy: Requirements,
+    /// Browser-session settings; routes only (see [`BrowserSession`]).
+    pub session: BrowserSession,
+}
+
+/// Where a route reads its token from and what a browser gets on failure.
+/// Ignored by egress, which always reads `Proxy-Authorization`.
+#[derive(Debug, Clone, Default)]
+pub struct BrowserSession {
+    /// Read the token from this cookie instead of `Authorization: Bearer`.
+    pub token_cookie: Option<String>,
+    /// `login_redirect` template; `{url}` is the encoded original URL.
+    pub login_redirect: Option<String>,
 }
 
 impl AuthValidator {
@@ -108,13 +157,19 @@ impl AuthValidator {
             algorithms,
             required_claims: cfg.required_claims.iter().cloned().collect(),
             inject_headers,
+            policy: Requirements::from_block(cfg),
+            session: BrowserSession {
+                token_cookie: cfg.token_cookie.clone(),
+                login_redirect: cfg.login_redirect.clone(),
+            },
         })
     }
 
-    /// Validate a bearer token. On a kid cache miss, attempts a single async
-    /// refresh of the JWKS and retries. Allow only when signature + standard
-    /// claims (`iss`/`aud`/`exp`) check out and every required claim is
-    /// present.
+    /// Validate a token. On a kid cache miss, attempts a single async refresh
+    /// of the JWKS and retries. Allow only when signature + standard claims
+    /// (`iss`/`aud`/`exp`) check out, every required claim is present and the
+    /// block's own claim rules hold. Route requirements are separate - see
+    /// [`validate_and_inject`](Self::validate_and_inject).
     pub async fn validate(&self, token: &str) -> Result<Claims, AuthError> {
         let header = decode_header(token).map_err(|_| AuthError::MalformedToken)?;
         if !self.algorithms.contains(&header.alg) {
@@ -142,9 +197,9 @@ impl AuthValidator {
             use jsonwebtoken::errors::ErrorKind;
             match e.kind() {
                 ErrorKind::InvalidSignature => AuthError::InvalidSignature,
+                ErrorKind::ExpiredSignature => AuthError::Expired,
                 ErrorKind::InvalidIssuer
                 | ErrorKind::InvalidAudience
-                | ErrorKind::ExpiredSignature
                 | ErrorKind::ImmatureSignature
                 | ErrorKind::MissingRequiredClaim(_) => AuthError::InvalidClaims(e.to_string()),
                 _ => AuthError::Other(e.to_string()),
@@ -159,19 +214,26 @@ impl AuthValidator {
             }
         }
 
+        self.policy.check(&data.claims)?;
+
         Ok(data.claims)
     }
 
-    /// Validate the bearer token, then write any configured claim-to-header
-    /// mappings into `headers`. Headers reserved by `inject_headers` are
-    /// always removed first so clients cannot spoof them. Returns the verified
-    /// claims (forwarded to an external authorizer when the route has one).
+    /// Validate the token, check the route's own requirements, then write any
+    /// configured claim-to-header mappings into `headers`. Headers reserved by
+    /// `inject_headers` are always removed first so clients cannot spoof them.
+    /// Returns the verified claims (forwarded to an external authorizer when
+    /// the route has one).
     pub async fn validate_and_inject(
         &self,
         token: &str,
         headers: &mut HeaderMap,
+        route: Option<&Requirements>,
     ) -> Result<Claims, AuthError> {
         let claims = self.validate(token).await?;
+        if let Some(r) = route {
+            r.check(&claims)?;
+        }
         self.apply_injector(headers, &claims)?;
         Ok(claims)
     }

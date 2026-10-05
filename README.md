@@ -28,7 +28,12 @@ small HTTP admin API.
 - **Per-route modules**: timeout, max body size, prefix stripping, JWT auth,
   external authoriser.
 - **JWT authentication** with JWKS auto-refresh on `kid` miss; verified
-  claims project into upstream-bound headers.
+  claims project into upstream-bound headers. Claim rules
+  (`claim_equals`, `claim_contains`) per issuer, plus per-route requirements
+  and step-up (`[routes.require]`: `amr`, `max_auth_age_seconds`).
+- **Browser sessions** for an identity-aware proxy: read the JWT from a cookie,
+  strip it before forwarding, and redirect page loads to a sign-in service
+  ([docs/identity-aware-proxy.md](docs/identity-aware-proxy.md)).
 - **External HTTP authorisers**: an alternative to API Gateway Lambda
   authorisers without cold starts. They can target an upstream pool for HA
   (balancing, health checks, retries). quik POSTs a JSON summary of the request to
@@ -96,6 +101,7 @@ on the authoriser hop.
 | Backends that self-register (NATS)    | [docs/service-registration.md](docs/service-registration.md) · [examples/nats](examples/nats) |
 | Graceful shutdown behind a perimeter  | [docs/graceful-shutdown.md](docs/graceful-shutdown.md) |
 | Trying external authorisers locally   | [docs/authorizer-testing.md](docs/authorizer-testing.md) |
+| Corporate sign-in in front of every app | [docs/identity-aware-proxy.md](docs/identity-aware-proxy.md) |
 | Exposing quik outside a CDN           | [docs/hardening.md](docs/hardening.md)            |
 | The full config schema                | [docs/config-reference.md](docs/config-reference.md) |
 
